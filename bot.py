@@ -85,12 +85,14 @@ def add_homework(chat_id: int, added_by: str, subject: str, description: str, de
     conn.close()
  
  
-def get_homework(chat_id: int, only_pending=True, days_ahead: int | None = None):
+def get_homework(only_pending=True, days_ahead: int | None = None):
+    """Список общий для всех — не привязан к конкретному чату, поэтому
+    его видно и в личке с ботом, и в любой группе, куда бот добавлен."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     query = ("SELECT id, subject, description, deadline, done, file_id, file_type, added_by, done_by "
-              "FROM homework WHERE chat_id = ?")
-    params = [chat_id]
+              "FROM homework WHERE 1=1")
+    params = []
     if only_pending:
         query += " AND done = 0"
     if days_ahead is not None:
@@ -105,25 +107,25 @@ def get_homework(chat_id: int, only_pending=True, days_ahead: int | None = None)
     return rows
  
  
-def get_one(chat_id: int, hw_id: int):
+def get_one(hw_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
         "SELECT id, subject, description, deadline, done, file_id, file_type, added_by, done_by "
-        "FROM homework WHERE id = ? AND chat_id = ?",
-        (hw_id, chat_id),
+        "FROM homework WHERE id = ?",
+        (hw_id,),
     )
     row = cur.fetchone()
     conn.close()
     return row
  
  
-def mark_done(chat_id: int, hw_id: int, done_by: str) -> bool:
+def mark_done(hw_id: int, done_by: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE homework SET done = 1, done_by = ? WHERE id = ? AND chat_id = ?",
-        (done_by, hw_id, chat_id),
+        "UPDATE homework SET done = 1, done_by = ? WHERE id = ?",
+        (done_by, hw_id),
     )
     changed = cur.rowcount > 0
     conn.commit()
@@ -131,10 +133,10 @@ def mark_done(chat_id: int, hw_id: int, done_by: str) -> bool:
     return changed
  
  
-def delete_homework(chat_id: int, hw_id: int) -> bool:
+def delete_homework(hw_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("DELETE FROM homework WHERE id = ? AND chat_id = ?", (hw_id, chat_id))
+    cur.execute("DELETE FROM homework WHERE id = ?", (hw_id,))
     changed = cur.rowcount > 0
     conn.commit()
     conn.close()
@@ -142,6 +144,8 @@ def delete_homework(chat_id: int, hw_id: int) -> bool:
  
  
 def get_due_tomorrow_unreminded():
+    """chat_id тут — это чат, где добавили задание (обычно личка с ботом);
+    именно туда и уйдёт персональное напоминание добавившему."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
@@ -264,11 +268,17 @@ def format_hw_line(hw_id, subject, description, deadline, done, file_id=None, fi
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     is_group = message.chat.type in ("group", "supergroup")
-    extra = (
-        "\n\n👥 Этот чат групповой — задания общие для всех участников: "
-        "кто добавил, все видят, любой может отметить выполненным."
-        if is_group else ""
-    )
+    if is_group:
+        await message.answer(
+            "👋 Привет! Список домашних заданий общий для всех.\n\n"
+            "В этом чате можно:\n"
+            "/list — посмотреть список\n"
+            "/today — что сдавать сегодня\n"
+            "/week — что сдавать на неделе\n"
+            "/done <id> — отметить выполненным\n\n"
+            "✏️ А вот добавлять новые задания можно только в личном чате со мной."
+        )
+        return
     await message.answer(
         "👋 Привет! Я бот для отслеживания домашних заданий.\n\n"
         "Используй кнопки внизу или команды из меню («/»):\n"
@@ -278,12 +288,24 @@ async def cmd_start(message: Message):
         "/week — что сдавать на этой неделе\n"
         "/done <id> — отметить как выполненное\n"
         "/delete <id> — удалить задание\n\n"
-        "К заданию можно прикрепить файл (фото или документ)." + extra,
+        "К заданию можно прикрепить файл (фото или документ).\n\n"
+        "📢 Добавь меня в общий чат класса — там все смогут смотреть список "
+        "командой /list, а добавлять новые задания сможешь только ты, в этой личке.",
         reply_markup=main_menu_kb(),
     )
  
  
-# ============ ДОБАВЛЕНИЕ ДЗ ============
+# ============ ДОБАВЛЕНИЕ ДЗ (только в личном чате с ботом) ============
+@router.message(Command("add"), F.chat.type.in_({"group", "supergroup"}))
+@router.message(F.text == "➕ Добавить", F.chat.type.in_({"group", "supergroup"}))
+async def cmd_add_blocked_in_group(message: Message):
+    await message.answer(
+        "✋ Добавлять задания можно только в личном чате с ботом.\n"
+        f"Напишите мне в личку: @{(await bot.me()).username}, и там используйте /add.\n"
+        "А смотреть список — можно прямо здесь, командой /list."
+    )
+ 
+ 
 @router.message(Command("add"))
 @router.message(F.text == "➕ Добавить")
 async def cmd_add(message: Message, state: FSMContext):
@@ -324,6 +346,8 @@ async def process_deadline(message: Message, state: FSMContext):
  
 async def finish_adding(state: FSMContext, chat_id: int, added_by: str,
                          file_id: str | None = None, file_type: str | None = None) -> str:
+    """chat_id тут — id личного чата того, кто добавляет (нужен только для
+    напоминаний ему лично); сам список заданий общий для всех."""
     data = await state.get_data()
     add_homework(chat_id, added_by, data["subject"], data["description"], data["deadline"], file_id, file_type)
     await state.clear()
@@ -380,21 +404,21 @@ async def send_hw_list(message: Message, rows, empty_text: str, header: str):
 @router.message(Command("list"))
 @router.message(F.text == "📋 Список")
 async def cmd_list(message: Message):
-    rows = get_homework(message.chat.id)
+    rows = get_homework()
     await send_hw_list(message, rows, "🎉 Нет невыполненных заданий!", "📋 Общий список домашних заданий:")
  
  
 @router.message(Command("today"))
 @router.message(F.text == "🔥 Сегодня")
 async def cmd_today(message: Message):
-    rows = get_homework(message.chat.id, days_ahead=0)
+    rows = get_homework(days_ahead=0)
     await send_hw_list(message, rows, "Сегодня сдавать ничего не нужно 👍", "🔥 На сегодня:")
  
  
 @router.message(Command("week"))
 @router.message(F.text == "📆 Неделя")
 async def cmd_week(message: Message):
-    rows = get_homework(message.chat.id, days_ahead=7)
+    rows = get_homework(days_ahead=7)
     await send_hw_list(message, rows, "На этой неделе всё сдано или заданий нет 👍", "📆 На неделю:")
  
  
@@ -406,7 +430,7 @@ async def cmd_done(message: Message):
         await message.answer("Использование: /done <id>\nНапример: /done 3")
         return
     hw_id = int(parts[1])
-    if mark_done(message.chat.id, hw_id, display_name(message.from_user)):
+    if mark_done(hw_id, display_name(message.from_user)):
         await message.answer(f"✅ Задание #{hw_id} отмечено как выполненное!")
     else:
         await message.answer("❌ Задание с таким id не найдено.")
@@ -419,7 +443,7 @@ async def cmd_delete(message: Message):
         await message.answer("Использование: /delete <id>\nНапример: /delete 3")
         return
     hw_id = int(parts[1])
-    if delete_homework(message.chat.id, hw_id):
+    if delete_homework(hw_id):
         await message.answer(f"🗑️ Задание #{hw_id} удалено.")
     else:
         await message.answer("❌ Задание с таким id не найдено.")
@@ -430,7 +454,7 @@ async def cmd_delete(message: Message):
 async def cb_done(callback: CallbackQuery):
     hw_id = int(callback.data.split(":")[1])
     who = display_name(callback.from_user)
-    if mark_done(callback.message.chat.id, hw_id, who):
+    if mark_done(hw_id, who):
         await callback.message.edit_text(f"✅ Задание #{hw_id} отмечено как выполненное ({who})!")
     else:
         await callback.answer("Задание не найдено", show_alert=True)
@@ -442,7 +466,7 @@ async def cb_done(callback: CallbackQuery):
 async def cb_delete(callback: CallbackQuery):
     hw_id = int(callback.data.split(":")[1])
     who = display_name(callback.from_user)
-    if delete_homework(callback.message.chat.id, hw_id):
+    if delete_homework(hw_id):
         await callback.message.edit_text(f"🗑️ Задание #{hw_id} удалено ({who}).")
     else:
         await callback.answer("Задание не найдено", show_alert=True)
@@ -453,7 +477,7 @@ async def cb_delete(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("file:"))
 async def cb_file(callback: CallbackQuery):
     hw_id = int(callback.data.split(":")[1])
-    row = get_one(callback.message.chat.id, hw_id)
+    row = get_one(hw_id)
     if not row or not row[5]:
         await callback.answer("Файл не найден", show_alert=True)
         return
@@ -493,4 +517,3 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
- 
