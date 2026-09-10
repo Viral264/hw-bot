@@ -422,6 +422,17 @@ async def cmd_week(message: Message):
     await send_hw_list(message, rows, "На этой неделе всё сдано или заданий нет 👍", "📆 На неделю:")
  
  
+# ============ ТРИГЕРНАЯ ФРАЗА ============
+# Срабатывает на "Инокентий" + "дз" в любом порядке и с любыми словами вокруг,
+# например: "Инокентий че по дз", "инокентий, что там с дз?" и т.п.
+@router.message(F.text.func(
+    lambda t: t is not None and "инокент" in t.lower() and "дз" in t.lower()
+))
+async def trigger_phrase(message: Message):
+    rows = get_homework()
+    await send_hw_list(message, rows, "🎉 Дз нет, можно выдыхать!", "📋 Вот что по дз:")
+ 
+ 
 # ============ ГОТОВО / УДАЛИТЬ — через команды ============
 @router.message(Command("done"))
 async def cmd_done(message: Message):
@@ -517,3 +528,4 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
+ 
