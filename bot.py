@@ -1,10 +1,13 @@
 import asyncio
+import html
 import logging
 import os
 import sqlite3
 from datetime import datetime, date, timedelta
  
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -22,11 +25,19 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
  
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН")
-DB_PATH = os.path.join(os.path.dirname(__file__), "homework.db")
+# DB_PATH можно переопределить переменной окружения — например, указать путь
+# внутри подключённого Railway Volume (/data/homework.db), чтобы данные
+# переживали обновления кода. Без этой переменной база хранится рядом с
+# bot.py — годится для запуска на своём компьютере, но НЕ для Railway.
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "homework.db"))
+# ID администратора — только этот пользователь может удалять задания.
+# Узнать свой id можно у бота @userinfobot. Задаётся переменной окружения ADMIN_ID.
+_admin_id_raw = os.getenv("ADMIN_ID", "").strip()
+ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else None
  
 logging.basicConfig(level=logging.INFO)
  
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
@@ -143,6 +154,21 @@ def get_homework(only_pending=True, days_ahead: int | None = None):
     return rows
  
  
+def get_homework_on_date(target: date, only_pending=True):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    query = ("SELECT id, subject, description, deadline, done, added_by, done_by "
+              "FROM homework WHERE date(deadline) = ?")
+    params = [target.isoformat()]
+    if only_pending:
+        query += " AND done = 0"
+    query += " ORDER BY id ASC"
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+ 
+ 
 def get_one(hw_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -169,11 +195,25 @@ def delete_homework(hw_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("DELETE FROM homework WHERE id = ?", (hw_id,))
+    changed = cur.rowcount > 0
     cur.execute("DELETE FROM homework_files WHERE hw_id = ?", (hw_id,))
-    changed = cur.rowcount >= 0
     conn.commit()
     conn.close()
     return changed
+ 
+ 
+def get_overdue_undone():
+    """Задания, у которых дедлайн уже прошёл (раньше сегодняшнего дня) и которые
+    никто не отметил и не удалил вручную — кандидаты на автоудаление в 17:00."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, chat_id, subject, description FROM homework "
+        "WHERE done = 0 AND date(deadline) < date('now')"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
  
  
 def update_field(hw_id: int, field: str, value: str) -> bool:
@@ -215,28 +255,29 @@ def display_name(user) -> str:
     return user.full_name
  
  
+def esc(text) -> str:
+    """Экранирует текст перед вставкой в HTML-разметку Telegram —
+    защищает от поломки сообщения, если в предмете/описании есть символы < > &."""
+    return html.escape(str(text))
+ 
+ 
 # ============ КЛАВИАТУРЫ ============
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📋 Список")],
-            [KeyboardButton(text="🔥 Сегодня"), KeyboardButton(text="📆 Неделя")],
+            [KeyboardButton(text="🔥 Сегодня"), KeyboardButton(text="📅 На завтра")],
+            [KeyboardButton(text="📆 Неделя")],
         ],
         resize_keyboard=True,
     )
  
  
 def hw_actions_kb(hw_id: int, files_count: int) -> InlineKeyboardMarkup:
-    buttons = [
-        [
-            InlineKeyboardButton(text="✅ Готово", callback_data=f"done:{hw_id}"),
-            InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit:{hw_id}"),
-        ],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete:{hw_id}")],
-    ]
+    buttons = [[InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit:{hw_id}")]]
     if files_count:
         word = "файл" if files_count == 1 else ("файла" if 2 <= files_count <= 4 else "файлов")
-        buttons.insert(1, [InlineKeyboardButton(
+        buttons.insert(0, [InlineKeyboardButton(
             text=f"📎 Показать {files_count} {word}", callback_data=f"files:{hw_id}"
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -302,23 +343,29 @@ def format_hw_line(hw_id, subject, description, deadline, done, added_by=None, d
     d = datetime.strptime(deadline, "%Y-%m-%d").date()
     days_left = (d - date.today()).days
     if days_left < 0:
-        status = "⚠️ просрочено"
+        status = "⚠️ <b>просрочено</b>"
     elif days_left == 0:
-        status = "🔥 сегодня"
+        status = "🔥 <b>сегодня</b>"
     elif days_left == 1:
-        status = "⏰ завтра"
+        status = "⏰ <b>завтра</b>"
     else:
         status = f"через {days_left} дн."
     mark = "✅" if done else "▫️"
-    line = (
-        f"{mark} #{hw_id} [{subject}] {description}\n"
-        f"   📅 {d.strftime('%d.%m.%Y')} ({status})"
-    )
+ 
+    lines = [
+        f"{mark} <b>#{hw_id} · {esc(subject)}</b>",
+        f"{esc(description)}",
+        "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+        f"📅 {d.strftime('%d.%m.%Y')} — {status}",
+    ]
+    footer = []
     if added_by:
-        line += f"\n   👤 добавил(а): {added_by}"
+        footer.append(f"добавил(а) {esc(added_by)}")
     if done and done_by:
-        line += f"\n   ✅ выполнил(а): {done_by}"
-    return line
+        footer.append(f"выполнил(а) {esc(done_by)}")
+    if footer:
+        lines.append(f"<i>👤 {' · '.join(footer)}</i>")
+    return "\n".join(lines)
  
  
 # ============ БАЗОВЫЕ КОМАНДЫ ============
@@ -327,27 +374,27 @@ async def cmd_start(message: Message):
     is_group = message.chat.type in ("group", "supergroup")
     if is_group:
         await message.answer(
-            "👋 Привет! Список домашних заданий общий для всех.\n\n"
-            "В этом чате можно:\n"
-            "/list — посмотреть список\n"
-            "/today — что сдавать сегодня\n"
-            "/week — что сдавать на неделе\n"
-            "/done <id> — отметить выполненным\n\n"
-            "✏️ А добавлять новые задания можно только в личном чате со мной."
+            "👋 <b>Привет!</b>\n"
+            "Список домашних заданий — общий для всех.\n\n"
+            "<b>Доступно в этом чате:</b>\n"
+            "📋 /list — посмотреть список\n"
+            "🔥 /today — что сдавать сегодня\n"
+            "📅 /tomorrow — что сдавать завтра\n"
+            "📆 /week — что сдавать на неделе\n\n"
+            "✏️ <i>Добавлять новые задания можно только в личном чате со мной.</i>"
         )
         return
     await message.answer(
-        "👋 Привет! Я бот для отслеживания домашних заданий.\n\n"
-        "Используй кнопки внизу или команды из меню («/»):\n"
-        "/add — добавить дз\n"
-        "/list — список невыполненных дз\n"
-        "/today — что сдавать сегодня\n"
-        "/week — что сдавать на этой неделе\n"
-        "/done <id> — отметить как выполненное\n"
-        "/delete <id> — удалить задание\n\n"
-        "К заданию можно прикрепить сразу несколько файлов, а потом отредактировать "
-        "предмет, описание или дедлайн в любой момент.\n\n"
-        "📢 Добавь меня в общий чат класса — там все смогут смотреть список "
+        "👋 <b>Привет! Я бот для отслеживания домашних заданий.</b>\n\n"
+        "<b>Основное — кнопками внизу или командами:</b>\n"
+        "➕ /add — добавить дз\n"
+        "📋 /list — список невыполненных дз\n"
+        "🔥 /today — что сдавать сегодня\n"
+        "📅 /tomorrow — что сдавать завтра\n"
+        "📆 /week — что сдавать на неделе\n\n"
+        "📎 <i>К заданию можно прикрепить сразу несколько файлов, а потом "
+        "отредактировать предмет, описание или дедлайн в любой момент.</i>\n\n"
+        "📢 <b>Добавь меня в общий чат класса</b> — там все смогут смотреть список "
         "командой /list, а добавлять новые задания сможешь только ты, в этой личке.",
         reply_markup=main_menu_kb(),
     )
@@ -359,7 +406,7 @@ async def cmd_start(message: Message):
 async def cmd_add_blocked_in_group(message: Message):
     me = await bot.me()
     await message.answer(
-        "✋ Добавлять задания можно только в личном чате с ботом.\n"
+        "✋ <b>Добавлять задания можно только в личном чате с ботом.</b>\n"
         f"Напишите мне в личку: @{me.username}, и там используйте /add.\n"
         "А смотреть список — можно прямо здесь, командой /list."
     )
@@ -401,7 +448,7 @@ async def process_deadline(message: Message, state: FSMContext):
     await state.set_state(AddHomework.attachment)
     await message.answer(
         "📎 Можно прикрепить файлы к заданию — присылайте фото или документы одно за другим, "
-        "сколько нужно.\nКогда закончите — нажмите «Готово».",
+        "сколько нужно.\n<i>Когда закончите — нажмите «Готово».</i>",
         reply_markup=files_done_kb(),
     )
  
@@ -427,7 +474,9 @@ async def process_finish_files(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     d = datetime.strptime(data["deadline"], "%Y-%m-%d").date()
     text = (
-        f"✅ Добавлено!\n📚 {data['subject']}\n📝 {data['description']}\n"
+        f"✅ <b>Задание добавлено!</b>\n"
+        f"📚 <b>{esc(data['subject'])}</b>\n"
+        f"{esc(data['description'])}\n"
         f"📅 {d.strftime('%d.%m.%Y')}"
     )
     if files_count:
@@ -447,9 +496,9 @@ async def process_attachment_invalid(message: Message):
 # ============ ПРОСМОТР СПИСКОВ ============
 async def send_hw_list(message: Message, rows, empty_text: str, header: str):
     if not rows:
-        await message.answer(empty_text)
+        await message.answer(f"🎉 <b>{esc(empty_text)}</b>")
         return
-    await message.answer(header)
+    await message.answer(f"<b>{header}</b>")
     for hw_id, subject, description, deadline, done, added_by, done_by in rows:
         text = format_hw_line(hw_id, subject, description, deadline, done, added_by, done_by)
         files_count = len(get_files(hw_id))
@@ -460,21 +509,29 @@ async def send_hw_list(message: Message, rows, empty_text: str, header: str):
 @router.message(F.text == "📋 Список")
 async def cmd_list(message: Message):
     rows = get_homework()
-    await send_hw_list(message, rows, "🎉 Нет невыполненных заданий!", "📋 Общий список домашних заданий:")
+    await send_hw_list(message, rows, "Нет невыполненных заданий!", "📋 Общий список домашних заданий")
  
  
 @router.message(Command("today"))
 @router.message(F.text == "🔥 Сегодня")
 async def cmd_today(message: Message):
     rows = get_homework(days_ahead=0)
-    await send_hw_list(message, rows, "Сегодня сдавать ничего не нужно 👍", "🔥 На сегодня:")
+    await send_hw_list(message, rows, "Сегодня сдавать ничего не нужно 👍", "🔥 На сегодня")
+ 
+ 
+@router.message(Command("tomorrow"))
+@router.message(F.text == "📅 На завтра")
+async def cmd_tomorrow(message: Message):
+    tomorrow = date.today() + timedelta(days=1)
+    rows = get_homework_on_date(tomorrow)
+    await send_hw_list(message, rows, "На завтра ничего не задано 👍", "📅 Дз на завтра")
  
  
 @router.message(Command("week"))
 @router.message(F.text == "📆 Неделя")
 async def cmd_week(message: Message):
     rows = get_homework(days_ahead=7)
-    await send_hw_list(message, rows, "На этой неделе всё сдано или заданий нет 👍", "📆 На неделю:")
+    await send_hw_list(message, rows, "На этой неделе всё сдано или заданий нет 👍", "📆 На неделю")
  
  
 # ============ ТРИГЕРНАЯ ФРАЗА ============
@@ -483,7 +540,7 @@ async def cmd_week(message: Message):
 ))
 async def trigger_phrase(message: Message):
     rows = get_homework()
-    await send_hw_list(message, rows, "🎉 Дз нет, можно выдыхать!", "📋 Вот что по дз:")
+    await send_hw_list(message, rows, "Дз нет, можно выдыхать!", "📋 Вот что по дз")
  
  
 # ============ ГОТОВО / УДАЛИТЬ — через команды ============
@@ -502,6 +559,9 @@ async def cmd_done(message: Message):
  
 @router.message(Command("delete"))
 async def cmd_delete(message: Message):
+    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Удалять задания может только администратор бота.")
+        return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
         await message.answer("Использование: /delete <id>\nНапример: /delete 3")
@@ -528,6 +588,9 @@ async def cb_done(callback: CallbackQuery):
  
 @router.callback_query(F.data.startswith("delete:"))
 async def cb_delete(callback: CallbackQuery):
+    if ADMIN_ID is not None and callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Удалять задания может только администратор", show_alert=True)
+        return
     hw_id = int(callback.data.split(":")[1])
     who = display_name(callback.from_user)
     if delete_homework(hw_id):
@@ -605,24 +668,42 @@ async def process_edit_value(message: Message, state: FSMContext):
         shown_value = value
         if field == "deadline":
             shown_value = datetime.strptime(value, "%Y-%m-%d").date().strftime("%d.%m.%Y")
-        await message.answer(f"✅ {field_names[field]} обновлён: {shown_value}")
+        await message.answer(f"✅ <b>{field_names[field]}</b> обновлён: {esc(shown_value)}")
     else:
         await message.answer("❌ Не удалось найти задание для изменения.")
     await state.clear()
  
  
-# ============ НАПОМИНАНИЯ ============
+# ============ НАПОМИНАНИЯ И АВТОУДАЛЕНИЕ ПРОСРОЧЕННЫХ ============
 async def send_reminders():
     rows = get_due_tomorrow_unreminded()
     for hw_id, chat_id, subject, description in rows:
         try:
             await bot.send_message(
                 chat_id,
-                f"⏰ Напоминание! Завтра дедлайн:\n📚 {subject}\n📝 {description}",
+                f"⏰ <b>Напоминание!</b> Завтра дедлайн:\n"
+                f"📚 <b>{esc(subject)}</b>\n{esc(description)}",
             )
             mark_reminded(hw_id)
         except Exception as e:
             logging.warning(f"Не удалось отправить напоминание {hw_id}: {e}")
+ 
+ 
+async def cleanup_overdue():
+    """Каждый день в 17:00: если задание просрочено и никто не удалил его вручную,
+    бот удаляет его сам и сообщает в чат, откуда оно было добавлено."""
+    rows = get_overdue_undone()
+    for hw_id, chat_id, subject, description in rows:
+        if delete_homework(hw_id):
+            logging.info(f"Автоудаление просроченного задания #{hw_id} ({subject})")
+            try:
+                await bot.send_message(
+                    chat_id,
+                    f"🗑️ <b>Автоматически удалено просроченное задание:</b>\n"
+                    f"📚 <b>{esc(subject)}</b>\n{esc(description)}",
+                )
+            except Exception as e:
+                logging.warning(f"Не удалось уведомить об автоудалении {hw_id}: {e}")
  
  
 async def main():
@@ -631,6 +712,7 @@ async def main():
  
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_reminders, "cron", hour=20, minute=0)
+    scheduler.add_job(cleanup_overdue, "cron", hour=17, minute=0)
     scheduler.start()
  
     logging.info("Бот запущен")
@@ -639,3 +721,4 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
+ 
