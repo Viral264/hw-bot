@@ -438,7 +438,7 @@ def mono_message_text() -> str | None:
     link = get_setting("mono_link")
     if not link:
         return None
-    note = get_setting("mono_note") or "Скинуться на нужды группы"
+    note = get_setting("mono_note") or "Скинуться на поддержку Инокентия"
     return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти в Monobank</a>"
  
  
