@@ -75,6 +75,18 @@ def init_db():
             FOREIGN KEY (hw_id) REFERENCES homework (id)
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schedule (
+            weekday INTEGER PRIMARY KEY,
+            subjects TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     # Миграция со старых версий базы
     cur.execute("PRAGMA table_info(homework)")
     cols = [row[1] for row in cur.fetchall()]
@@ -132,6 +144,65 @@ def get_files(hw_id: int):
     rows = cur.fetchall()
     conn.close()
     return rows
+ 
+ 
+# ============ РАСПИСАНИЕ УРОКОВ ============
+WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+WEEKDAY_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+ 
+ 
+def set_schedule_day(weekday: int, subjects: list[str]):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO schedule (weekday, subjects) VALUES (?, ?) "
+        "ON CONFLICT(weekday) DO UPDATE SET subjects = excluded.subjects",
+        (weekday, ",".join(subjects)),
+    )
+    conn.commit()
+    conn.close()
+ 
+ 
+def get_schedule_day(weekday: int) -> list[str]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT subjects FROM schedule WHERE weekday = ?", (weekday,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return []
+    return [s.strip() for s in row[0].split(",") if s.strip()]
+ 
+ 
+def get_full_schedule() -> dict[int, list[str]]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT weekday, subjects FROM schedule")
+    rows = cur.fetchall()
+    conn.close()
+    return {wd: [s.strip() for s in subs.split(",") if s.strip()] for wd, subs in rows}
+ 
+ 
+# ============ НАСТРОЙКИ (ссылка на монобанку и т.п.) ============
+def set_setting(key: str, value: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+ 
+ 
+def get_setting(key: str) -> str | None:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
  
  
 def get_homework(only_pending=True, days_ahead: int | None = None):
@@ -203,7 +274,7 @@ def delete_homework(hw_id: int) -> bool:
  
  
 def get_overdue_undone():
-    """Задания, у которых дедлайн ужа прошёл (раньше сегодняшнего дня) и которые
+    """Задания, у которых дедлайн уже прошёл (раньше сегодняшнего дня) и которые
     никто не отметил и не удалил вручную — кандидаты на автоудаление в 17:00."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -309,6 +380,12 @@ async def set_bot_commands():
         BotCommand(command="done", description="Отметить выполненным: /done <id>"),
         BotCommand(command="delete", description="Удалить задание: /delete <id>"),
         BotCommand(command="dbinfo", description="[admin] Диагностика базы данных"),
+        BotCommand(command="schedule", description="Показать расписание уроков"),
+        BotCommand(command="setschedule", description="[admin] Настроить расписание"),
+        BotCommand(command="mono", description="Ссылка на банку"),
+        BotCommand(command="setmono", description="[admin] Указать ссылку на банку"),
+        BotCommand(command="edit", description="Изменить задание: /edit <id>"),
+        BotCommand(command="files", description="Показать файлы задания: /files <id>"),
     ]
     await bot.set_my_commands(commands)
  
@@ -324,6 +401,11 @@ class AddHomework(StatesGroup):
 # ============ FSM: РЕДАКТИРОВАНИЕ ДЗ ============
 class EditHomework(StatesGroup):
     waiting_value = State()
+ 
+ 
+# ============ FSM: НАСТРОЙКА РАСПИСАНИЯ ============
+class SetSchedule(StatesGroup):
+    waiting_text = State()
  
  
 def parse_date(text: str) -> str | None:
@@ -401,6 +483,114 @@ async def cmd_start(message: Message):
     )
  
  
+# ============ РАСПИСАНИЕ УРОКОВ ============
+@router.message(Command("schedule"))
+async def cmd_schedule(message: Message):
+    full = get_full_schedule()
+    if not full:
+        await message.answer(
+            "📭 Расписание ещё не настроено." +
+            ("\nНастроить: /setschedule" if ADMIN_ID is None or message.from_user.id == ADMIN_ID else "")
+        )
+        return
+    lines = ["🗓 <b>Расписание уроков</b>", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"]
+    for wd in range(7):
+        subjects = full.get(wd)
+        if subjects:
+            lines.append(f"<b>{WEEKDAY_FULL[wd]}:</b> {esc(', '.join(subjects))}")
+    await message.answer("\n".join(lines))
+ 
+ 
+@router.message(Command("setschedule"))
+async def cmd_setschedule(message: Message, state: FSMContext):
+    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Настраивать расписание может только администратор.")
+        return
+    await state.set_state(SetSchedule.waiting_text)
+    await message.answer(
+        "🗓 Пришлите расписание одним сообщением — по одной строке на день, формат:\n"
+        "<code>Пн: Математика, Физика, Английский\n"
+        "Вт: История, Химия\n"
+        "Ср: Литература, Физра</code>\n\n"
+        "Можно не указывать все 7 дней — только те, где есть уроки. "
+        "Старое расписание для дней из вашего сообщения будет заменено."
+    )
+ 
+ 
+@router.message(SetSchedule.waiting_text)
+async def process_setschedule(message: Message, state: FSMContext):
+    day_lookup = {name.lower(): i for i, name in enumerate(WEEKDAY_NAMES)}
+    day_lookup.update({name.lower(): i for i, name in enumerate(WEEKDAY_FULL)})
+ 
+    saved_days = []
+    unknown_lines = []
+    for raw_line in message.text.splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        day_part, subjects_part = line.split(":", 1)
+        weekday = day_lookup.get(day_part.strip().lower())
+        if weekday is None:
+            unknown_lines.append(raw_line)
+            continue
+        subjects = [s.strip() for s in subjects_part.split(",") if s.strip()]
+        if subjects:
+            set_schedule_day(weekday, subjects)
+            saved_days.append(WEEKDAY_FULL[weekday])
+ 
+    await state.clear()
+    if not saved_days:
+        await message.answer(
+            "❌ Не удалось разобрать ни одной строки. Проверьте формат — например:\n"
+            "<code>Пн: Математика, Физика</code>"
+        )
+        return
+ 
+    text = "✅ Расписание обновлено для: " + ", ".join(saved_days)
+    if unknown_lines:
+        text += "\n⚠️ Не распознаны строки:\n" + "\n".join(esc(l) for l in unknown_lines)
+    await message.answer(text)
+ 
+ 
+# ============ БАНКА (MONOBANK) ============
+def mono_message_text() -> str | None:
+    link = get_setting("mono_link")
+    if not link:
+        return None
+    note = get_setting("mono_note") or "Скинуться на нужды группы"
+    return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти в Monobank</a>"
+ 
+ 
+@router.message(Command("mono"))
+async def cmd_mono(message: Message):
+    text = mono_message_text()
+    if not text:
+        extra = "\nНастроить: /setmono <ссылка на банку>" if ADMIN_ID is None or message.from_user.id == ADMIN_ID else ""
+        await message.answer("📭 Ссылка на банку ещё не добавлена." + extra)
+        return
+    await message.answer(text, disable_web_page_preview=False)
+ 
+ 
+@router.message(Command("setmono"))
+async def cmd_setmono(message: Message):
+    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Настраивать банку может только администратор.")
+        return
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(
+            "Использование: /setmono <ссылка> [подпись]\n"
+            "Например:\n/setmono https://send.monobank.ua/jar/xxxxx Сбор на нужды группы"
+        )
+        return
+    link = parts[1]
+    note = parts[2] if len(parts) > 2 else None
+    set_setting("mono_link", link)
+    if note:
+        set_setting("mono_note", note)
+    await message.answer("✅ Ссылка на банку сохранена. Проверить: /mono")
+ 
+ 
 # ============ ДОБАВЛЕНИЕ ДЗ (только в личном чате с ботом) ============
 @router.message(Command("add"), F.chat.type.in_({"group", "supergroup"}))
 @router.message(F.text == "➕ Добавить", F.chat.type.in_({"group", "supergroup"}))
@@ -417,7 +607,27 @@ async def cmd_add_blocked_in_group(message: Message):
 @router.message(F.text == "➕ Добавить")
 async def cmd_add(message: Message, state: FSMContext):
     await state.set_state(AddHomework.subject)
-    await message.answer("📚 По какому предмету задание?")
+    today_subjects = get_schedule_day(date.today().weekday())
+    if today_subjects:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=s, callback_data=f"quicksubj:{s}")] for s in today_subjects[:8]
+        ])
+        await message.answer(
+            "📚 По какому предмету задание?\n<i>Можно выбрать из сегодняшнего расписания или написать своё.</i>",
+            reply_markup=kb,
+        )
+    else:
+        await message.answer("📚 По какому предмету задание?")
+ 
+ 
+@router.callback_query(AddHomework.subject, F.data.startswith("quicksubj:"))
+async def process_subject_quick(callback: CallbackQuery, state: FSMContext):
+    subject = callback.data.split(":", 1)[1]
+    await state.update_data(subject=subject)
+    await state.set_state(AddHomework.description)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(f"📚 Предмет: <b>{esc(subject)}</b>\n📝 Что нужно сделать? (опишите задание)")
+    await callback.answer()
  
  
 @router.message(AddHomework.subject)
@@ -494,45 +704,111 @@ async def process_attachment_invalid(message: Message):
     )
  
  
-# ============ ПРОСМОТР СПИСКОВ ============
-async def send_hw_list(message: Message, rows, empty_text: str, header: str):
+# ============ ПРОСМОТР СПИСКОВ (одно сообщение + листание кнопками) ============
+PAGE_SIZE = 5
+ 
+ 
+def fetch_rows_for_view(view: str):
+    if view == "today":
+        return get_homework(days_ahead=0)
+    if view == "tomorrow":
+        return get_homework_on_date(date.today() + timedelta(days=1))
+    if view == "week":
+        return get_homework(days_ahead=7)
+    return get_homework()  # "list" и всё остальное — полный список
+ 
+ 
+VIEW_TITLES = {
+    "list": "📋 Общий список домашних заданий",
+    "today": "🔥 На сегодня",
+    "tomorrow": "📅 Дз на завтра",
+    "week": "📆 На неделю",
+}
+VIEW_EMPTY = {
+    "list": "Нет невыполненных заданий!",
+    "today": "Сегодня сдавать ничего не нужно 👍",
+    "tomorrow": "На завтра ничего не задано 👍",
+    "week": "На этой неделе всё сдано или заданий нет 👍",
+}
+ 
+ 
+def build_list_page(view: str, page: int):
+    rows = fetch_rows_for_view(view)
     if not rows:
-        await message.answer(f"🎉 <b>{esc(empty_text)}</b>")
-        return
-    await message.answer(f"<b>{header}</b>")
-    for hw_id, subject, description, deadline, done, added_by, done_by in rows:
-        text = format_hw_line(hw_id, subject, description, deadline, done, added_by, done_by)
+        text = f"🎉 <b>{esc(VIEW_EMPTY.get(view, 'Пусто'))}</b>"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ ЕЩЕ", callback_data="mono_info")]])
+        return text, kb
+ 
+    total_pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
+ 
+    blocks = [f"<b>{VIEW_TITLES.get(view, 'Список')}</b>  ({page + 1}/{total_pages})", ""]
+    for hw_id, subject, description, deadline, done, added_by, done_by in chunk:
+        blocks.append(format_hw_line(hw_id, subject, description, deadline, done, added_by, done_by))
         files_count = len(get_files(hw_id))
-        await message.answer(text, reply_markup=hw_actions_kb(hw_id, files_count))
+        if files_count:
+            blocks[-1] += f"\n📎 файлов: {files_count}"
+        blocks.append("")
+    text = "\n".join(blocks).rstrip()
+ 
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"hwpage:{view}:{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"hwpage:{view}:{page + 1}"))
+    keyboard = []
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton(text="➕ ЕЩЕ", callback_data="mono_info")])
+    return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
+ 
+ 
+async def send_hw_page(message: Message, view: str):
+    text, kb = build_list_page(view, 0)
+    await message.answer(text, reply_markup=kb)
+ 
+ 
+@router.callback_query(F.data.startswith("hwpage:"))
+async def cb_hwpage(callback: CallbackQuery):
+    _, view, page_str = callback.data.split(":")
+    text, kb = build_list_page(view, int(page_str))
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+ 
+ 
+@router.callback_query(F.data == "mono_info")
+async def cb_mono_info(callback: CallbackQuery):
+    text = mono_message_text()
+    if not text:
+        await callback.answer("Ссылка на банку ещё не добавлена", show_alert=True)
+        return
+    await callback.message.answer(text)
+    await callback.answer()
  
  
 @router.message(Command("list"))
 @router.message(F.text == "📋 Список")
 async def cmd_list(message: Message):
-    rows = get_homework()
-    await send_hw_list(message, rows, "Нет невыполненных заданий!", "📋 Общий список домашних заданий")
+    await send_hw_page(message, "list")
  
  
 @router.message(Command("today"))
 @router.message(F.text == "🔥 Сегодня")
 async def cmd_today(message: Message):
-    rows = get_homework(days_ahead=0)
-    await send_hw_list(message, rows, "Сегодня сдавать ничего не нужно 👍", "🔥 На сегодня")
+    await send_hw_page(message, "today")
  
  
 @router.message(Command("tomorrow"))
 @router.message(F.text == "📅 На завтра")
 async def cmd_tomorrow(message: Message):
-    tomorrow = date.today() + timedelta(days=1)
-    rows = get_homework_on_date(tomorrow)
-    await send_hw_list(message, rows, "На завтра ничего не задано 👍", "📅 Дз на завтра")
+    await send_hw_page(message, "tomorrow")
  
  
 @router.message(Command("week"))
 @router.message(F.text == "📆 Неделя")
 async def cmd_week(message: Message):
-    rows = get_homework(days_ahead=7)
-    await send_hw_list(message, rows, "На этой неделе всё сдано или заданий нет 👍", "📆 На неделю")
+    await send_hw_page(message, "week")
  
  
 # ============ ТРИГЕРНАЯ ФРАЗА ============
@@ -540,8 +816,8 @@ async def cmd_week(message: Message):
     lambda t: t is not None and "инокент" in t.lower() and "дз" in t.lower()
 ))
 async def trigger_phrase(message: Message):
-    rows = get_homework()
-    await send_hw_list(message, rows, "Дз нет, можно выдыхать!", "📋 Вот что по дз")
+    await send_hw_page(message, "list")
+ 
  
  
 # ============ ГОТОВО / УДАЛИТЬ — через команды ============
@@ -654,6 +930,24 @@ async def cb_files(callback: CallbackQuery):
     await callback.answer()
  
  
+@router.message(Command("files"))
+async def cmd_files(message: Message):
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /files <id>\nНапример: /files 3")
+        return
+    hw_id = int(parts[1])
+    files = get_files(hw_id)
+    if not files:
+        await message.answer("📭 У этого задания нет файлов (или id не найден).")
+        return
+    for file_id, file_type in files:
+        if file_type == "photo":
+            await message.answer_photo(file_id, caption=f"📎 К заданию #{hw_id}")
+        else:
+            await message.answer_document(file_id, caption=f"📎 К заданию #{hw_id}")
+ 
+ 
 # ============ РЕДАКТИРОВАНИЕ ЗАДАНИЯ ============
 @router.callback_query(F.data.startswith("edit:"))
 async def cb_edit_start(callback: CallbackQuery):
@@ -663,6 +957,19 @@ async def cb_edit_start(callback: CallbackQuery):
         return
     await callback.message.answer("Что хотите изменить?", reply_markup=edit_choice_kb(hw_id))
     await callback.answer()
+ 
+ 
+@router.message(Command("edit"))
+async def cmd_edit(message: Message):
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /edit <id>\nНапример: /edit 3")
+        return
+    hw_id = int(parts[1])
+    if not get_one(hw_id):
+        await message.answer("❌ Задание с таким id не найдено.")
+        return
+    await message.answer("Что хотите изменить?", reply_markup=edit_choice_kb(hw_id))
  
  
 @router.callback_query(F.data == "edit_cancel")
