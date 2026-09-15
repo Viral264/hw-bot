@@ -593,7 +593,7 @@ async def cmd_setmono(message: Message):
  
 # ============ ДОБАВЛЕНИЕ ДЗ (только в личном чате с ботом) ============
 @router.message(Command("add"), F.chat.type.in_({"group", "supergroup"}))
-@router.message(F.text == "➕ Добавить", F.chat.type.in_({"group", "supergroup"}))
+@router.message(F.text == "➕ На поддержку бота", F.chat.type.in_({"group", "supergroup"}))
 async def cmd_add_blocked_in_group(message: Message):
     me = await bot.me()
     await message.answer(
