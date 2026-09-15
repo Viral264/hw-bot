@@ -598,7 +598,7 @@ def build_list_page(view: str, page: int):
     if not rows:
         text = f"🎉 <b>{esc(VIEW_EMPTY.get(view, 'Пусто'))}</b>"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 На поддержку бота", callback_data="mono_info")]
+            [InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")]
         ])
         return text, kb
  
