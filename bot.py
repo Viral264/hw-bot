@@ -308,6 +308,7 @@ async def set_bot_commands():
         BotCommand(command="week", description="Задания на неделю"),
         BotCommand(command="done", description="Отметить выполненным: /done <id>"),
         BotCommand(command="delete", description="Удалить задание: /delete <id>"),
+        BotCommand(command="dbinfo", description="[admin] Диагностика базы данных"),
     ]
     await bot.set_my_commands(commands)
  
@@ -555,6 +556,43 @@ async def cmd_done(message: Message):
         await message.answer(f"✅ Задание #{hw_id} отмечено как выполненное!")
     else:
         await message.answer("❌ Задание с таким id не найдено.")
+ 
+ 
+@router.message(Command("dbinfo"))
+async def cmd_dbinfo(message: Message):
+    """Диагностика: показывает, где именно бот хранит базу данных прямо сейчас
+    и сколько там записей — помогает найти проблему с Volume/DB_PATH на Railway."""
+    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Эта команда только для администратора.")
+        return
+ 
+    exists = os.path.exists(DB_PATH)
+    size = os.path.getsize(DB_PATH) if exists else 0
+ 
+    total_rows = 0
+    error = None
+    if exists:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM homework")
+            total_rows = cur.fetchone()[0]
+            conn.close()
+        except Exception as e:
+            error = str(e)
+ 
+    lines = [
+        "🔧 <b>Диагностика базы данных</b>",
+        "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+        f"📁 Путь: <code>{esc(DB_PATH)}</code>",
+        f"📌 Взят из переменной DB_PATH: {'да' if os.getenv('DB_PATH') else 'нет (используется путь по умолчанию!)'}",
+        f"📄 Файл существует: {'да ✅' if exists else 'НЕТ ❌'}",
+        f"📦 Размер файла: {size} байт",
+        f"📋 Всего заданий в базе: {total_rows}",
+    ]
+    if error:
+        lines.append(f"⚠️ Ошибка чтения: {esc(error)}")
+    await message.answer("\n".join(lines))
  
  
 @router.message(Command("delete"))
