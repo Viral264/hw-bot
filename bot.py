@@ -427,7 +427,7 @@ async def cmd_start(message: Message):
         "📆 /week — что сдавать на неделе\n\n"
         "📎 <i>К заданию можно прикрепить сразу несколько файлов, а потом "
         "отредактировать предмет, описание или дедлайн в любой момент.</i>\n\n"
-        "📢 <b>Добавь меня в общий чат класса</b> — там все смогут смотреть список "
+        "📢 <b>Добавь меня в общий чат групи </b> — там все смогут смотреть список "
         "командой /list, а добавлять новые задания сможешь только ты, в этой личке.",
         reply_markup=main_menu_kb(),
     )
@@ -455,7 +455,7 @@ async def cmd_mono(message: Message):
 @router.message(Command("setmono"))
 async def cmd_setmono(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Настраивать банку может только администратор.")
+        await message.answer("🚫 Настраивать банку может только Инокентий.")
         return
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
@@ -478,7 +478,7 @@ async def cmd_setmono(message: Message):
 async def cmd_add_blocked_in_group(message: Message):
     me = await bot.me()
     await message.answer(
-        "✋ <b>Добавлять задания можно только в личном чате с ботом.</b>\n"
+        "✋ <b>Добавлять задания можно только в личном чате со мной.</b>\n"
         f"Напишите мне в личку: @{me.username}, и там используйте /add.\n"
         "А смотреть список — можно прямо здесь, командой /list."
     )
@@ -742,7 +742,7 @@ async def cmd_dbinfo(message: Message):
 @router.message(Command("delete"))
 async def cmd_delete(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Удалять задания может только администратор бота.")
+        await message.answer("🚫 Удалять задания может только мой батя.")
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
