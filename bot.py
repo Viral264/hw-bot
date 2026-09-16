@@ -427,7 +427,7 @@ async def cmd_start(message: Message):
         "📆 /week — что сдавать на неделе\n\n"
         "📎 <i>К заданию можно прикрепить сразу несколько файлов, а потом "
         "отредактировать предмет, описание или дедлайн в любой момент.</i>\n\n"
-        "📢 <b>Добавь меня в общий чат групи </b> — там все смогут смотреть список "
+        "📢 <b>Добавь меня в общий чат класса</b> — там все смогут смотреть список "
         "командой /list, а добавлять новые задания сможешь только ты, в этой личке.",
         reply_markup=main_menu_kb(),
     )
@@ -438,7 +438,7 @@ def mono_message_text() -> str | None:
     link = get_setting("mono_link")
     if not link:
         return None
-    note = get_setting("mono_note") or "Скинуться на поддержку Инокентия"
+    note = get_setting("mono_note") or "Скинуться на нужды группы"
     return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти в Monobank</a>"
  
  
@@ -455,7 +455,7 @@ async def cmd_mono(message: Message):
 @router.message(Command("setmono"))
 async def cmd_setmono(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Настраивать банку может только Инокентий.")
+        await message.answer("🚫 Настраивать банку может только администратор.")
         return
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
@@ -478,7 +478,7 @@ async def cmd_setmono(message: Message):
 async def cmd_add_blocked_in_group(message: Message):
     me = await bot.me()
     await message.answer(
-        "✋ <b>Добавлять задания можно только в личном чате со мной.</b>\n"
+        "✋ <b>Добавлять задания можно только в личном чате с ботом.</b>\n"
         f"Напишите мне в личку: @{me.username}, и там используйте /add.\n"
         "А смотреть список — можно прямо здесь, командой /list."
     )
@@ -598,7 +598,7 @@ def build_list_page(view: str, page: int):
     if not rows:
         text = f"🎉 <b>{esc(VIEW_EMPTY.get(view, 'Пусто'))}</b>"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")]
+            [InlineKeyboardButton(text="💳 На поддержку бота", callback_data="mono_info")]
         ])
         return text, kb
  
@@ -628,7 +628,7 @@ def build_list_page(view: str, page: int):
     keyboard = list(files_buttons)
     if nav_row:
         keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")])
+    keyboard.append([InlineKeyboardButton(text="💳 На поддержку бота", callback_data="mono_info")])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
  
  
@@ -679,9 +679,20 @@ async def cmd_week(message: Message):
     await send_hw_page(message, "week")
  
  
-# ============ ТРИГЕРНАЯ ФРАЗА ============
+# ============ ТРИГЕРНЫЕ ФРАЗЫ ============
+# "нокент" — общая часть и для "Инокентий", и для правильного "Иннокентий" (с двумя Н),
+# поэтому сработает при любом написании имени.
+@router.message(F.text.func(lambda t: t is not None and "что на завтра" in t.lower()))
+async def trigger_tomorrow(message: Message):
+    await send_hw_page(message, "tomorrow")
+ 
+ 
 @router.message(F.text.func(
-    lambda t: t is not None and "инокент" in t.lower() and "дз" in t.lower()
+    lambda t: t is not None and (
+        ("нокент" in t.lower() and "дз" in t.lower())
+        or "че по дз" in t.lower()
+        or "что задавали" in t.lower()
+    )
 ))
 async def trigger_phrase(message: Message):
     await send_hw_page(message, "list")
@@ -742,7 +753,7 @@ async def cmd_dbinfo(message: Message):
 @router.message(Command("delete"))
 async def cmd_delete(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Удалять задания может только мой батя.")
+        await message.answer("🚫 Удалять задания может только администратор бота.")
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
@@ -934,3 +945,4 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
+ 
