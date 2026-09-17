@@ -560,6 +560,20 @@ AI_SESSION_MINUTES = 5
  
 MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
  
+# Фразы, после которых бот сам завершает активную сессию разговора — дальше снова
+# нужно обращаться по имени, чтобы не отвечать на посторонние сообщения в чате.
+AI_STOP_PHRASES = (
+    "дякую", "дякуємо", "спасибо", "спасиб", "благодарю",
+    "иди отдыхай", "йди відпочивай", "отключайся", "відключайся",
+    "хватит", "досить", "все понятно", "все зрозуміло", "усе зрозуміло",
+    "пока", "бувай", "до встречі",
+)
+ 
+ 
+def is_stop_phrase(text: str) -> bool:
+    low = text.lower().strip(" .!?,")
+    return any(phrase in low for phrase in AI_STOP_PHRASES)
+ 
  
 def extract_hw_id(raw: str) -> int | None:
     """Находит номер задания в свободной фразе: '#13', '№13', '13 задание', 'задание 13'."""
@@ -1061,9 +1075,31 @@ async def process_edit_value(message: Message, state: FSMContext):
 # ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
 # Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
 # триггеры списка дз и шаги добавления/редактирования задания.
-# ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
-# Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
-# триггеры списка дз и шаги добавления/редактирования задания.
+ 
+def wants_ai_stop(message: Message) -> bool:
+    """Фразы вроде 'спасибо'/'дякую'/'отключайся' — завершают активную сессию,
+    без обращения к ИИ (чтобы не тратить запрос на простое прощание)."""
+    text = message.text or ""
+    if not text or text.startswith("/") or not is_stop_phrase(text):
+        return False
+    if message.chat.type == "private":
+        return True
+    low = text.lower()
+    if "нокент" in low:
+        return True
+    reply = message.reply_to_message
+    if reply and reply.from_user and reply.from_user.is_bot:
+        return True
+    active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
+    return bool(active_until and datetime.now() < active_until)
+ 
+ 
+@router.message(wants_ai_stop)
+async def ai_stop(message: Message):
+    AI_ACTIVE_UNTIL.pop(message.chat.id, None)
+    await message.answer("😊 Будь ласка! Звертайтесь знову, якщо що — просто покличте по імені.")
+ 
+ 
 def wants_ai(message: Message) -> bool:
     text = message.text or ""
     if not text or text.startswith("/"):
