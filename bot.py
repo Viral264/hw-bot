@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import html
 import logging
 import os
@@ -40,6 +41,10 @@ ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else None
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 # llama-3.3-70b-versatile отключена Groq 16.08.2026 — используем актуальную модель
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+# Модель с поддержкой изображений — для просмотра прикреплённых фото. Groq часто меняет
+# состав моделей для картинок; если перестанет работать, поменяйте эту переменную на
+# актуальное имя с console.groq.com/docs/vision, код трогать не нужно.
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
  
 logging.basicConfig(level=logging.INFO)
  
@@ -489,7 +494,20 @@ AI_SYSTEM_PROMPT = (
 )
  
  
-async def ask_ai(user_text: str) -> str:
+async def download_photo_as_data_url(file_id: str) -> str | None:
+    """Скачивает фото из Telegram и превращает в data-URL для отправки в ИИ."""
+    try:
+        file = await bot.get_file(file_id)
+        file_bytes_io = await bot.download_file(file.file_path)
+        raw = file_bytes_io.read()
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception as e:
+        logging.warning(f"Не удалось скачать фото {file_id} для ИИ: {e}")
+        return None
+ 
+ 
+async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> str:
     if not GROQ_API_KEY:
         raise RuntimeError(
             "ИИ-консультант не настроен. Администратору нужно получить бесплатный ключ на "
@@ -499,14 +517,22 @@ async def ask_ai(user_text: str) -> str:
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": GROQ_MODEL,
-        "max_tokens": 700,
-        "messages": [
+ 
+    if image_data_urls:
+        # Мультимодальный запрос: текст + картинки — нужна модель с поддержкой vision
+        content = [{"type": "text", "text": user_text}]
+        for url in image_data_urls[:5]:  # у Groq лимит 5 изображений за запрос
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        model = GROQ_VISION_MODEL
+        messages = [{"role": "user", "content": content}]  # vision-модели обычно без system
+    else:
+        model = GROQ_MODEL
+        messages = [
             {"role": "system", "content": AI_SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
-        ],
-    }
+        ]
+ 
+    payload = {"model": model, "max_tokens": 700, "messages": messages}
     timeout = aiohttp.ClientTimeout(total=40)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(
@@ -527,13 +553,15 @@ async def cmd_ai(message: Message):
         await message.answer(
             "🤖 Спросите что угодно, или уточните по заданию так:\n"
             "<code>/ai #12 объясни это задание</code>\n"
-            "<code>/ai чем отличается ковалентная связь от ионной?</code>"
+            "<code>/ai чем отличается ковалентная связь от ионной?</code>\n\n"
+            "<i>Если к заданию прикреплено фото — ИИ его тоже посмотрит.</i>"
         )
         return
  
     # Если в начале указан номер задания (#12) — подмешиваем его как контекст
     match = re.match(r"#(\d+)\s*(.*)", raw, re.DOTALL)
     prompt = raw
+    image_urls = []
     if match:
         hw_id = int(match.group(1))
         question = match.group(2).strip() or "Объясни это задание и подскажи, как его выполнить."
@@ -544,13 +572,20 @@ async def cmd_ai(message: Message):
                 f"Контекст задания:\nПредмет: {subject}\nЗадание: {description}\nДедлайн: {deadline}\n\n"
                 f"Вопрос: {question}"
             )
+            photo_files = [fid for fid, ftype in get_files(hw_id) if ftype == "photo"]
+            if photo_files:
+                await message.answer(f"📎 Смотрю прикреплённое фото ({len(photo_files)} шт.)...")
+                for file_id in photo_files[:5]:
+                    url = await download_photo_as_data_url(file_id)
+                    if url:
+                        image_urls.append(url)
         else:
             await message.answer(f"❌ Задание #{hw_id} не найдено, отвечаю без контекста задания.")
             prompt = question
  
     await bot.send_chat_action(message.chat.id, "typing")
     try:
-        answer = await ask_ai(prompt)
+        answer = await ask_ai(prompt, image_urls or None)
     except Exception as e:
         logging.warning(f"Ошибка ИИ-консультанта: {e}")
         await message.answer(f"⚠️ {esc(str(e))}")
