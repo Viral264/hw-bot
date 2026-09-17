@@ -546,42 +546,53 @@ async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> st
             return answer or "Не получилось получить ответ, попробуйте переформулировать вопрос."
  
  
-@router.message(Command("ai"))
-async def cmd_ai(message: Message):
-    raw = message.text.partition(" ")[2].strip()
-    if not raw:
-        await message.answer(
-            "🤖 Спросите что угодно, или уточните по заданию так:\n"
-            "<code>/ai #12 объясни это задание</code>\n"
-            "<code>/ai чем отличается ковалентная связь от ионной?</code>\n\n"
-            "<i>Если к заданию прикреплено фото — ИИ его тоже посмотрит.</i>"
-        )
-        return
+# Запоминаем, о каком задании шла речь в каждом чате — чтобы фразы вроде
+# "а покажи его файлы" подхватывали контекст предыдущего вопроса.
+LAST_AI_TASK: dict[int, int] = {}
  
-    # Если в начале указан номер задания (#12) — подмешиваем его как контекст
-    match = re.match(r"#(\d+)\s*(.*)", raw, re.DOTALL)
+MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
+ 
+ 
+def extract_hw_id(raw: str) -> int | None:
+    """Находит номер задания в свободной фразе: '#13', '№13', '13 задание', 'задание 13'."""
+    for pattern in (
+        r"[#№]\s*(\d+)",
+        r"(\d+)[-\s]*(?:го|му|м|е|ое|ую|ой)?\s*задани",
+        r"задани\w*\s*[#№]?\s*(\d+)",
+    ):
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return None
+ 
+ 
+async def handle_ai_question(message: Message, raw: str):
+    """Общая логика ИИ-консультанта — используется и командой /ai, и обычным текстом."""
+    hw_id = extract_hw_id(raw)
+    # Если номера нет, но человек ссылается на "него/это" — берём последнее обсуждавшееся задание
+    if hw_id is None and re.search(r"\b(его|это|этой|эту|этого|него|неё|ним|там)\b", raw, re.IGNORECASE):
+        hw_id = LAST_AI_TASK.get(message.chat.id)
+ 
     prompt = raw
     image_urls = []
-    if match:
-        hw_id = int(match.group(1))
-        question = match.group(2).strip() or "Объясни это задание и подскажи, как его выполнить."
+    if hw_id is not None:
         row = get_one(hw_id)
         if row:
+            LAST_AI_TASK[message.chat.id] = hw_id
             _, subject, description, deadline, *_ = row
             prompt = (
-                f"Контекст задания:\nПредмет: {subject}\nЗадание: {description}\nДедлайн: {deadline}\n\n"
-                f"Вопрос: {question}"
+                f"Контекст задания #{hw_id}:\nПредмет: {subject}\nЗадание: {description}\n"
+                f"Дедлайн: {deadline}\n\nВопрос: {raw}"
             )
             photo_files = [fid for fid, ftype in get_files(hw_id) if ftype == "photo"]
             if photo_files:
-                await message.answer(f"📎 Смотрю прикреплённое фото ({len(photo_files)} шт.)...")
+                await message.answer(f"📎 Смотрю прикреплённые фото ({len(photo_files)} шт.)...")
                 for file_id in photo_files[:5]:
                     url = await download_photo_as_data_url(file_id)
                     if url:
                         image_urls.append(url)
         else:
             await message.answer(f"❌ Задание #{hw_id} не найдено, отвечаю без контекста задания.")
-            prompt = question
  
     await bot.send_chat_action(message.chat.id, "typing")
     try:
@@ -592,6 +603,21 @@ async def cmd_ai(message: Message):
         return
  
     await message.answer(f"🤖 {esc(answer)}")
+ 
+ 
+@router.message(Command("ai"))
+async def cmd_ai(message: Message):
+    raw = message.text.partition(" ")[2].strip()
+    if not raw:
+        await message.answer(
+            "🤖 Просто напишите мне вопрос обычным текстом — команда не обязательна.\n\n"
+            "В группе позовите по имени:\n"
+            "<code>Инокентий, объясни 13 задание</code>\n"
+            "<code>Инокентий, что такое ковалентная связь?</code>\n\n"
+            "<i>Если к заданию прикреплено фото — я его тоже посмотрю.</i>"
+        )
+        return
+    await handle_ai_question(message, raw)
  
  
 # ============ ДОБАВЛЕНИЕ ДЗ (только в личном чате с ботом) ============
@@ -1020,6 +1046,33 @@ async def process_edit_value(message: Message, state: FSMContext):
     await state.clear()
  
  
+# ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
+# Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
+# триггеры списка дз и шаги добавления/редактирования задания.
+def wants_ai(message: Message) -> bool:
+    text = message.text or ""
+    if not text or text.startswith("/"):
+        return False
+    if text in MENU_BUTTON_TEXTS:
+        return False
+    low = text.lower()
+    # В группе — обращение по имени или ответ на сообщение бота
+    if "нокент" in low:
+        return True
+    reply = message.reply_to_message
+    if reply and reply.from_user and reply.from_user.is_bot:
+        return True
+    # В личке можно просто писать текстом, без обращения по имени
+    return message.chat.type == "private"
+ 
+ 
+@router.message(wants_ai)
+async def ai_freeform(message: Message):
+    # Убираем обращение по имени из вопроса, чтобы не путать модель
+    cleaned = re.sub(r"\b[иИ]н+окент\w*\b[\s,!:—-]*", "", message.text, flags=re.IGNORECASE).strip()
+    await handle_ai_question(message, cleaned or message.text)
+ 
+ 
 # ============ НАПОМИНАНИЯ И АВТОУДАЛЕНИЕ ПРОСРОЧЕННЫХ ============
 async def send_reminders():
     rows = get_due_tomorrow_unreminded()
@@ -1067,3 +1120,4 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
+ 
