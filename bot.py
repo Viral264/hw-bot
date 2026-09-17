@@ -553,6 +553,11 @@ async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> st
 # "а покажи его файлы" подхватывали контекст предыдущего вопроса.
 LAST_AI_TASK: dict[int, int] = {}
  
+# Пока в чате идёт "активный разговор" с ИИ, обращаться по имени каждый раз не нужно.
+# Сессия продлевается при каждом сообщении и истекает через AI_SESSION_MINUTES тишины.
+AI_ACTIVE_UNTIL: dict[int, datetime] = {}
+AI_SESSION_MINUTES = 5
+ 
 MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
  
  
@@ -571,6 +576,10 @@ def extract_hw_id(raw: str) -> int | None:
  
 async def handle_ai_question(message: Message, raw: str):
     """Общая логика ИИ-консультанта — используется и командой /ai, и обычным текстом."""
+    # Продлеваем "активный разговор" в этом чате — следующие сообщения без
+    # обращения по имени тоже будут доходить до ИИ, пока сессия не истекла.
+    AI_ACTIVE_UNTIL[message.chat.id] = datetime.now() + timedelta(minutes=AI_SESSION_MINUTES)
+ 
     hw_id = extract_hw_id(raw)
     # Если номера нет, но человек ссылается на "него/это" — берём последнее обсуждавшееся задание
     if hw_id is None and re.search(r"\b(его|это|этой|эту|этого|него|неё|ним|там)\b", raw, re.IGNORECASE):
@@ -1052,6 +1061,9 @@ async def process_edit_value(message: Message, state: FSMContext):
 # ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
 # Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
 # триггеры списка дз и шаги добавления/редактирования задания.
+# ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
+# Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
+# триггеры списка дз и шаги добавления/редактирования задания.
 def wants_ai(message: Message) -> bool:
     text = message.text or ""
     if not text or text.startswith("/"):
@@ -1059,14 +1071,20 @@ def wants_ai(message: Message) -> bool:
     if text in MENU_BUTTON_TEXTS:
         return False
     low = text.lower()
+    # В личке можно просто писать текстом, без обращения по имени
+    if message.chat.type == "private":
+        return True
     # В группе — обращение по имени или ответ на сообщение бота
     if "нокент" in low:
         return True
     reply = message.reply_to_message
     if reply and reply.from_user and reply.from_user.is_bot:
         return True
-    # В личке можно просто писать текстом, без обращения по имени
-    return message.chat.type == "private"
+    # Или разговор с ботом уже идёт и сессия ещё не истекла — имя повторять не нужно
+    active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
+    if active_until and datetime.now() < active_until:
+        return True
+    return False
  
  
 @router.message(wants_ai)
