@@ -2,9 +2,11 @@ import asyncio
 import html
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, date, timedelta
  
+import aiohttp
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -34,6 +36,9 @@ DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "homework
 # Узнать свой id можно у бота @userinfobot. Задаётся переменной окружения ADMIN_ID.
 _admin_id_raw = os.getenv("ADMIN_ID", "").strip()
 ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else None
+# Для ИИ-консультанта (/ai) — бесплатный ключ с console.groq.com
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
  
 logging.basicConfig(level=logging.INFO)
  
@@ -338,6 +343,7 @@ async def set_bot_commands():
         BotCommand(command="delete", description="Удалить задание: /delete <id>"),
         BotCommand(command="dbinfo", description="[admin] Диагностика базы данных"),
         BotCommand(command="mono", description="Ссылка на банку"),
+        BotCommand(command="ai", description="Спросить ИИ-консультанта"),
         BotCommand(command="setmono", description="[admin] Указать ссылку на банку"),
         BotCommand(command="edit", description="Изменить задание: /edit <id>"),
         BotCommand(command="files", description="Показать файлы задания: /files <id>"),
@@ -470,6 +476,86 @@ async def cmd_setmono(message: Message):
     if note:
         set_setting("mono_note", note)
     await message.answer("✅ Ссылка на банку сохранена. Проверить: /mono")
+ 
+ 
+# ============ ИИ-КОНСУЛЬТАНТ (/ai) ============
+AI_SYSTEM_PROMPT = (
+    "Ты — дружелюбный ИИ-консультант внутри Telegram-бота для отслеживания домашних заданий. "
+    "Ты можешь отвечать на обычные вопросы и помогать конкретно с домашкой: объяснять задание, "
+    "подсказывать ход решения, разбирать тему. Если в сообщении дан контекст задания (предмет, "
+    "описание, дедлайн) — используй его и отвечай применительно к этому заданию. "
+    "Отвечай кратко и по делу, на русском языке, без лишней воды и форматирования звёздочками."
+)
+ 
+ 
+async def ask_ai(user_text: str) -> str:
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "ИИ-консультант не настроен. Администратору нужно получить бесплатный ключ на "
+            "console.groq.com и добавить переменную GROQ_API_KEY в настройках Railway."
+        )
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "max_tokens": 700,
+        "messages": [
+            {"role": "system", "content": AI_SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ],
+    }
+    timeout = aiohttp.ClientTimeout(total=40)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            "https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers
+        ) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                err = data.get("error", {}).get("message", str(data))
+                raise RuntimeError(f"Ошибка API ({resp.status}): {err}")
+            answer = data["choices"][0]["message"]["content"].strip()
+            return answer or "Не получилось получить ответ, попробуйте переформулировать вопрос."
+ 
+ 
+@router.message(Command("ai"))
+async def cmd_ai(message: Message):
+    raw = message.text.partition(" ")[2].strip()
+    if not raw:
+        await message.answer(
+            "🤖 Спросите что угодно, или уточните по заданию так:\n"
+            "<code>/ai #12 объясни это задание</code>\n"
+            "<code>/ai чем отличается ковалентная связь от ионной?</code>"
+        )
+        return
+ 
+    # Если в начале указан номер задания (#12) — подмешиваем его как контекст
+    match = re.match(r"#(\d+)\s*(.*)", raw, re.DOTALL)
+    prompt = raw
+    if match:
+        hw_id = int(match.group(1))
+        question = match.group(2).strip() or "Объясни это задание и подскажи, как его выполнить."
+        row = get_one(hw_id)
+        if row:
+            _, subject, description, deadline, *_ = row
+            prompt = (
+                f"Контекст задания:\nПредмет: {subject}\nЗадание: {description}\nДедлайн: {deadline}\n\n"
+                f"Вопрос: {question}"
+            )
+        else:
+            await message.answer(f"❌ Задание #{hw_id} не найдено, отвечаю без контекста задания.")
+            prompt = question
+ 
+    await bot.send_chat_action(message.chat.id, "typing")
+    try:
+        answer = await ask_ai(prompt)
+    except Exception as e:
+        logging.warning(f"Ошибка ИИ-консультанта: {e}")
+        await message.answer(f"⚠️ {esc(str(e))}")
+        return
+ 
+    await message.answer(f"🤖 {esc(answer)}")
  
  
 # ============ ДОБАВЛЕНИЕ ДЗ (только в личном чате с ботом) ============
