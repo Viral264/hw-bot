@@ -6,7 +6,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, date, timedelta
- 
+
 import aiohttp
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -25,7 +25,7 @@ from aiogram.types import (
     BotCommand,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
- 
+
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН")
 # DB_PATH можно переопределить переменной окружения — например, указать путь
@@ -45,15 +45,15 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 # состав моделей для картинок; если перестанет работать, поменяйте эту переменную на
 # актуальное имя с console.groq.com/docs/vision, код трогать не нужно.
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
- 
+
 logging.basicConfig(level=logging.INFO)
- 
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
- 
- 
+
+
 # ============ БАЗА ДАННЫХ ============
 # Список заданий общий для всех (не привязан к конкретному чату) — его видно
 # и в личке с ботом, и в любой группе, куда бот добавлен. Добавлять новые
@@ -115,8 +115,8 @@ def init_db():
             )
     conn.commit()
     conn.close()
- 
- 
+
+
 def add_homework(chat_id: int, added_by: str, subject: str, description: str, deadline: str) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -129,8 +129,8 @@ def add_homework(chat_id: int, added_by: str, subject: str, description: str, de
     conn.commit()
     conn.close()
     return hw_id
- 
- 
+
+
 def add_file(hw_id: int, file_id: str, file_type: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -140,8 +140,8 @@ def add_file(hw_id: int, file_id: str, file_type: str):
     )
     conn.commit()
     conn.close()
- 
- 
+
+
 def get_files(hw_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -149,8 +149,8 @@ def get_files(hw_id: int):
     rows = cur.fetchall()
     conn.close()
     return rows
- 
- 
+
+
 # ============ НАСТРОЙКИ (ссылка на монобанку и т.п.) ============
 def set_setting(key: str, value: str):
     conn = sqlite3.connect(DB_PATH)
@@ -162,8 +162,8 @@ def set_setting(key: str, value: str):
     )
     conn.commit()
     conn.close()
- 
- 
+
+
 def get_setting(key: str) -> str | None:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -171,8 +171,8 @@ def get_setting(key: str) -> str | None:
     row = cur.fetchone()
     conn.close()
     return row[0] if row else None
- 
- 
+
+
 def get_homework(only_pending=True, days_ahead: int | None = None):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -191,8 +191,8 @@ def get_homework(only_pending=True, days_ahead: int | None = None):
     rows = cur.fetchall()
     conn.close()
     return rows
- 
- 
+
+
 def get_homework_on_date(target: date, only_pending=True):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -206,8 +206,8 @@ def get_homework_on_date(target: date, only_pending=True):
     rows = cur.fetchall()
     conn.close()
     return rows
- 
- 
+
+
 def get_one(hw_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -218,8 +218,8 @@ def get_one(hw_id: int):
     row = cur.fetchone()
     conn.close()
     return row
- 
- 
+
+
 def mark_done(hw_id: int, done_by: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -228,8 +228,8 @@ def mark_done(hw_id: int, done_by: str) -> bool:
     conn.commit()
     conn.close()
     return changed
- 
- 
+
+
 def delete_homework(hw_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -239,8 +239,8 @@ def delete_homework(hw_id: int) -> bool:
     conn.commit()
     conn.close()
     return changed
- 
- 
+
+
 def get_overdue_undone():
     """Задания, у которых дедлайн уже прошёл (раньше сегодняшнего дня) и которые
     никто не отметил и не удалил вручную — кандидаты на автоудаление в 17:00."""
@@ -253,8 +253,8 @@ def get_overdue_undone():
     rows = cur.fetchall()
     conn.close()
     return rows
- 
- 
+
+
 def update_field(hw_id: int, field: str, value: str) -> bool:
     assert field in ("subject", "description", "deadline")  # защита от произвольных имён колонок
     conn = sqlite3.connect(DB_PATH)
@@ -264,8 +264,8 @@ def update_field(hw_id: int, field: str, value: str) -> bool:
     conn.commit()
     conn.close()
     return changed
- 
- 
+
+
 def get_due_tomorrow_unreminded():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -278,28 +278,28 @@ def get_due_tomorrow_unreminded():
     rows = cur.fetchall()
     conn.close()
     return rows
- 
- 
+
+
 def mark_reminded(hw_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("UPDATE homework SET reminded = 1 WHERE id = ?", (hw_id,))
     conn.commit()
     conn.close()
- 
- 
+
+
 def display_name(user) -> str:
     if user.username:
         return f"@{user.username}"
     return user.full_name
- 
- 
+
+
 def esc(text) -> str:
     """Экранирует текст перед вставкой в HTML-разметку Telegram —
     защищает от поломки сообщения, если в предмете/описании есть символы < > &."""
     return html.escape(str(text))
- 
- 
+
+
 # ============ КЛАВИАТУРЫ ============
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -310,8 +310,8 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
- 
- 
+
+
 def hw_actions_kb(hw_id: int, files_count: int) -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit:{hw_id}")]]
     if files_count:
@@ -320,14 +320,14 @@ def hw_actions_kb(hw_id: int, files_count: int) -> InlineKeyboardMarkup:
             text=f"📎 Показать {files_count} {word}", callback_data=f"files:{hw_id}"
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
- 
- 
+
+
 def files_done_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="✅ Готово, больше файлов нет", callback_data="finish_files")]]
     )
- 
- 
+
+
 def edit_choice_kb(hw_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📚 Предмет", callback_data=f"editfield:{hw_id}:subject")],
@@ -335,8 +335,8 @@ def edit_choice_kb(hw_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📅 Дедлайн", callback_data=f"editfield:{hw_id}:deadline")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="edit_cancel")],
     ])
- 
- 
+
+
 # ============ КОМАНДЫ БОТА (меню "/" в Telegram) ============
 async def set_bot_commands():
     commands = [
@@ -355,21 +355,21 @@ async def set_bot_commands():
         BotCommand(command="files", description="Показать файлы задания: /files <id>"),
     ]
     await bot.set_my_commands(commands)
- 
- 
+
+
 # ============ FSM: ДОБАВЛЕНИЕ ДЗ ============
 class AddHomework(StatesGroup):
     subject = State()
     description = State()
     deadline = State()
     attachment = State()  # можно прислать несколько файлов подряд
- 
- 
+
+
 # ============ FSM: РЕДАКТИРОВАНИЕ ДЗ ============
 class EditHomework(StatesGroup):
     waiting_value = State()
- 
- 
+
+
 def parse_date(text: str) -> str | None:
     text = text.strip()
     formats = ["%d.%m.%Y", "%d.%m.%y", "%d.%m"]
@@ -382,8 +382,8 @@ def parse_date(text: str) -> str | None:
         except ValueError:
             continue
     return None
- 
- 
+
+
 def format_hw_line(hw_id, subject, description, deadline, done, added_by=None, done_by=None) -> str:
     d = datetime.strptime(deadline, "%Y-%m-%d").date()
     days_left = (d - date.today()).days
@@ -396,7 +396,7 @@ def format_hw_line(hw_id, subject, description, deadline, done, added_by=None, d
     else:
         status = f"через {days_left} дн."
     mark = "✅" if done else "▫️"
- 
+
     lines = [
         f"{mark} <b>#{hw_id} · {esc(subject)}</b>",
         f"{esc(description)}",
@@ -411,8 +411,8 @@ def format_hw_line(hw_id, subject, description, deadline, done, added_by=None, d
     if footer:
         lines.append(f"<i>👤 {' · '.join(footer)}</i>")
     return "\n".join(lines)
- 
- 
+
+
 # ============ БАЗОВЫЕ КОМАНДЫ ============
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -443,8 +443,8 @@ async def cmd_start(message: Message):
         "командой /list, а добавлять новые задания сможешь только ты, в этой личке.",
         reply_markup=main_menu_kb(),
     )
- 
- 
+
+
 # ============ БАНКА (MONOBANK) ============
 def mono_message_text() -> str | None:
     link = get_setting("mono_link")
@@ -452,8 +452,8 @@ def mono_message_text() -> str | None:
         return None
     note = get_setting("mono_note") or "На поддержку Инокентия"
     return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти в Monobank</a>"
- 
- 
+
+
 @router.message(Command("mono"))
 async def cmd_mono(message: Message):
     text = mono_message_text()
@@ -462,8 +462,8 @@ async def cmd_mono(message: Message):
         await message.answer("📭 Ссылка на банку ещё не добавлена." + extra)
         return
     await message.answer(text, disable_web_page_preview=False)
- 
- 
+
+
 @router.message(Command("setmono"))
 async def cmd_setmono(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
@@ -482,8 +482,8 @@ async def cmd_setmono(message: Message):
     if note:
         set_setting("mono_note", note)
     await message.answer("✅ Ссылка на банку сохранена. Проверить: /mono")
- 
- 
+
+
 # ============ ИИ-КОНСУЛЬТАНТ (/ai) ============
 AI_SYSTEM_PROMPT = (
     "Ти — доброзичливий ШІ-консультант усередині Telegram-бота для відстеження домашніх завдань. "
@@ -493,8 +493,8 @@ AI_SYSTEM_PROMPT = (
     "ЗАВЖДИ відповідай українською мовою, навіть якщо запитання поставлено російською або іншою мовою. "
     "Відповідай стисло і по суті, без зайвої води та форматування зірочками."
 )
- 
- 
+
+
 async def download_photo_as_data_url(file_id: str) -> str | None:
     """Скачивает фото из Telegram и превращает в data-URL для отправки в ИИ."""
     try:
@@ -506,9 +506,10 @@ async def download_photo_as_data_url(file_id: str) -> str | None:
     except Exception as e:
         logging.warning(f"Не удалось скачать фото {file_id} для ИИ: {e}")
         return None
- 
- 
-async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> str:
+
+
+async def ask_ai(user_text: str, image_data_urls: list[str] | None = None,
+                  history: list[dict] | None = None) -> str:
     if not GROQ_API_KEY:
         raise RuntimeError(
             "ИИ-консультант не настроен. Администратору нужно получить бесплатный ключ на "
@@ -518,11 +519,11 @@ async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> st
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
- 
+
     if image_data_urls:
         # Мультимодальный запрос: текст + картинки — нужна модель с поддержкой vision.
-        # Vision-модели часто не принимают отдельную system-роль, поэтому инструкцию
-        # (в т.ч. требование отвечать украинским) вшиваем прямо в текст запроса.
+        # Vision-модели часто не принимают отдельную system-роль и длинную историю,
+        # поэтому инструкцию вшиваем прямо в текст, а историю сюда не подмешиваем.
         content = [{"type": "text", "text": f"{AI_SYSTEM_PROMPT}\n\n{user_text}"}]
         for url in image_data_urls[:5]:  # у Groq лимит 5 изображений за запрос
             content.append({"type": "image_url", "image_url": {"url": url}})
@@ -530,11 +531,10 @@ async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> st
         messages = [{"role": "user", "content": content}]
     else:
         model = GROQ_MODEL
-        messages = [
-            {"role": "system", "content": AI_SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ]
- 
+        messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+        messages.extend(history or [])
+        messages.append({"role": "user", "content": user_text})
+
     payload = {"model": model, "max_tokens": 700, "messages": messages}
     timeout = aiohttp.ClientTimeout(total=40)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -547,19 +547,37 @@ async def ask_ai(user_text: str, image_data_urls: list[str] | None = None) -> st
                 raise RuntimeError(f"Ошибка API ({resp.status}): {err}")
             answer = data["choices"][0]["message"]["content"].strip()
             return answer or "Не получилось получить ответ, попробуйте переформулировать вопрос."
- 
- 
+
+
 # Запоминаем, о каком задании шла речь в каждом чате — чтобы фразы вроде
 # "а покажи его файлы" подхватывали контекст предыдущего вопроса.
 LAST_AI_TASK: dict[int, int] = {}
- 
+
+# Память переписки с ИИ по каждому чату — чтобы бот помнил предыдущие сообщения
+# в рамках одного разговора. Хранится в памяти процесса (не в базе), поэтому
+# сбрасывается при перезапуске бота — это нормально.
+CONVERSATIONS: dict[int, list[dict]] = {}
+MAX_HISTORY_TURNS = 6  # сколько последних пар "вопрос-ответ" помнить
+
+
+def push_history(chat_id: int, role: str, content: str):
+    hist = CONVERSATIONS.setdefault(chat_id, [])
+    hist.append({"role": role, "content": content})
+    max_len = MAX_HISTORY_TURNS * 2
+    if len(hist) > max_len:
+        del hist[: len(hist) - max_len]
+
+
+def clear_history(chat_id: int):
+    CONVERSATIONS.pop(chat_id, None)
+
 # Пока в чате идёт "активный разговор" с ИИ, обращаться по имени каждый раз не нужно.
 # Сессия продлевается при каждом сообщении и истекает через AI_SESSION_MINUTES тишины.
 AI_ACTIVE_UNTIL: dict[int, datetime] = {}
 AI_SESSION_MINUTES = 5
- 
+
 MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
- 
+
 # Фразы, после которых бот сам завершает активную сессию разговора — дальше снова
 # нужно обращаться по имени, чтобы не отвечать на посторонние сообщения в чате.
 AI_STOP_PHRASES = (
@@ -568,13 +586,13 @@ AI_STOP_PHRASES = (
     "хватит", "досить", "все понятно", "все зрозуміло", "усе зрозуміло",
     "пока", "бувай", "до встречі",
 )
- 
- 
+
+
 def is_stop_phrase(text: str) -> bool:
     low = text.lower().strip(" .!?,")
     return any(phrase in low for phrase in AI_STOP_PHRASES)
- 
- 
+
+
 def extract_hw_id(raw: str) -> int | None:
     """Находит номер задания в свободной фразе: '#13', '№13', '13 задание', 'задание 13'."""
     for pattern in (
@@ -586,19 +604,19 @@ def extract_hw_id(raw: str) -> int | None:
         if m:
             return int(m.group(1))
     return None
- 
- 
+
+
 async def handle_ai_question(message: Message, raw: str):
     """Общая логика ИИ-консультанта — используется и командой /ai, и обычным текстом."""
     # Продлеваем "активный разговор" в этом чате — следующие сообщения без
     # обращения по имени тоже будут доходить до ИИ, пока сессия не истекла.
     AI_ACTIVE_UNTIL[message.chat.id] = datetime.now() + timedelta(minutes=AI_SESSION_MINUTES)
- 
+
     hw_id = extract_hw_id(raw)
     # Если номера нет, но человек ссылается на "него/это" — берём последнее обсуждавшееся задание
     if hw_id is None and re.search(r"\b(его|это|этой|эту|этого|него|неё|ним|там)\b", raw, re.IGNORECASE):
         hw_id = LAST_AI_TASK.get(message.chat.id)
- 
+
     prompt = raw
     image_urls = []
     if hw_id is not None:
@@ -619,18 +637,21 @@ async def handle_ai_question(message: Message, raw: str):
                         image_urls.append(url)
         else:
             await message.answer(f"❌ Задание #{hw_id} не найдено, отвечаю без контекста задания.")
- 
+
     await bot.send_chat_action(message.chat.id, "typing")
     try:
-        answer = await ask_ai(prompt, image_urls or None)
+        history = CONVERSATIONS.get(message.chat.id) if not image_urls else None
+        answer = await ask_ai(prompt, image_urls or None, history)
     except Exception as e:
         logging.warning(f"Ошибка ИИ-консультанта: {e}")
         await message.answer(f"⚠️ {esc(str(e))}")
         return
- 
+
+    push_history(message.chat.id, "user", raw)
+    push_history(message.chat.id, "assistant", answer)
     await message.answer(f"🤖 {esc(answer)}")
- 
- 
+
+
 @router.message(Command("ai"))
 async def cmd_ai(message: Message):
     raw = message.text.partition(" ")[2].strip()
@@ -644,8 +665,8 @@ async def cmd_ai(message: Message):
         )
         return
     await handle_ai_question(message, raw)
- 
- 
+
+
 # ============ ДОБАВЛЕНИЕ ДЗ (только в личном чате с ботом) ============
 @router.message(Command("add"), F.chat.type.in_({"group", "supergroup"}))
 @router.message(F.text == "➕ Добавить", F.chat.type.in_({"group", "supergroup"}))
@@ -656,29 +677,29 @@ async def cmd_add_blocked_in_group(message: Message):
         f"Напишите мне в личку: @{me.username}, и там используйте /add.\n"
         "А смотреть список — можно прямо здесь, командой /list."
     )
- 
- 
+
+
 @router.message(Command("add"))
 @router.message(F.text == "➕ Добавить")
 async def cmd_add(message: Message, state: FSMContext):
     await state.set_state(AddHomework.subject)
     await message.answer("📚 По какому предмету задание?")
- 
- 
+
+
 @router.message(AddHomework.subject)
 async def process_subject(message: Message, state: FSMContext):
     await state.update_data(subject=message.text.strip())
     await state.set_state(AddHomework.description)
     await message.answer("📝 Что нужно сделать? (опишите задание)")
- 
- 
+
+
 @router.message(AddHomework.description)
 async def process_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
     await state.set_state(AddHomework.deadline)
     await message.answer("📅 Когда дедлайн? (в формате ДД.ММ.ГГГГ, например 15.09.2026)")
- 
- 
+
+
 @router.message(AddHomework.deadline)
 async def process_deadline(message: Message, state: FSMContext):
     parsed = parse_date(message.text)
@@ -697,22 +718,22 @@ async def process_deadline(message: Message, state: FSMContext):
         "сколько нужно.\n<i>Когда закончите — нажмите «Готово».</i>",
         reply_markup=files_done_kb(),
     )
- 
- 
+
+
 @router.message(AddHomework.attachment, F.photo)
 async def process_attachment_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     add_file(data["hw_id"], message.photo[-1].file_id, "photo")
     await message.answer("✅ Фото добавлено. Присылайте ещё, или нажмите «Готово».", reply_markup=files_done_kb())
- 
- 
+
+
 @router.message(AddHomework.attachment, F.document)
 async def process_attachment_document(message: Message, state: FSMContext):
     data = await state.get_data()
     add_file(data["hw_id"], message.document.file_id, "document")
     await message.answer("✅ Документ добавлен. Присылайте ещё, или нажмите «Готово».", reply_markup=files_done_kb())
- 
- 
+
+
 @router.callback_query(AddHomework.attachment, F.data == "finish_files")
 async def process_finish_files(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -730,19 +751,19 @@ async def process_finish_files(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(text, reply_markup=main_menu_kb())
     await callback.answer()
- 
- 
+
+
 @router.message(AddHomework.attachment)
 async def process_attachment_invalid(message: Message):
     await message.answer(
         "Пришлите фото или документ, либо нажмите «✅ Готово, больше файлов нет» кнопкой выше."
     )
- 
- 
+
+
 # ============ ПРОСМОТР СПИСКОВ (одно сообщение + листание кнопками) ============
 PAGE_SIZE = 5
- 
- 
+
+
 def fetch_rows_for_view(view: str):
     if view == "today":
         return get_homework(days_ahead=0)
@@ -751,8 +772,8 @@ def fetch_rows_for_view(view: str):
     if view == "week":
         return get_homework(days_ahead=7)
     return get_homework()  # "list" и всё остальное — полный список
- 
- 
+
+
 VIEW_TITLES = {
     "list": "📋 Общий список домашних заданий",
     "today": "🔥 На сегодня",
@@ -765,8 +786,8 @@ VIEW_EMPTY = {
     "tomorrow": "На завтра ничего не задано 👍",
     "week": "На этой неделе всё сдано или заданий нет 👍",
 }
- 
- 
+
+
 def build_list_page(view: str, page: int):
     rows = fetch_rows_for_view(view)
     if not rows:
@@ -775,11 +796,11 @@ def build_list_page(view: str, page: int):
             [InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")]
         ])
         return text, kb
- 
+
     total_pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
- 
+
     blocks = [f"<b>{VIEW_TITLES.get(view, 'Список')}</b>  ({page + 1}/{total_pages})", ""]
     files_buttons = []
     for hw_id, subject, description, deadline, done, added_by, done_by in chunk:
@@ -793,7 +814,7 @@ def build_list_page(view: str, page: int):
             )])
         blocks.append("")
     text = "\n".join(blocks).rstrip()
- 
+
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"hwpage:{view}:{page - 1}"))
@@ -804,21 +825,21 @@ def build_list_page(view: str, page: int):
         keyboard.append(nav_row)
     keyboard.append([InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
- 
- 
+
+
 async def send_hw_page(message: Message, view: str):
     text, kb = build_list_page(view, 0)
     await message.answer(text, reply_markup=kb)
- 
- 
+
+
 @router.callback_query(F.data.startswith("hwpage:"))
 async def cb_hwpage(callback: CallbackQuery):
     _, view, page_str = callback.data.split(":")
     text, kb = build_list_page(view, int(page_str))
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
- 
- 
+
+
 @router.callback_query(F.data == "mono_info")
 async def cb_mono_info(callback: CallbackQuery):
     text = mono_message_text()
@@ -827,40 +848,40 @@ async def cb_mono_info(callback: CallbackQuery):
         return
     await callback.message.answer(text)
     await callback.answer()
- 
- 
+
+
 @router.message(Command("list"))
 @router.message(F.text == "📋 Список")
 async def cmd_list(message: Message):
     await send_hw_page(message, "list")
- 
- 
+
+
 @router.message(Command("today"))
 @router.message(F.text == "🔥 Сегодня")
 async def cmd_today(message: Message):
     await send_hw_page(message, "today")
- 
- 
+
+
 @router.message(Command("tomorrow"))
 @router.message(F.text == "📅 На завтра")
 async def cmd_tomorrow(message: Message):
     await send_hw_page(message, "tomorrow")
- 
- 
+
+
 @router.message(Command("week"))
 @router.message(F.text == "📆 Неделя")
 async def cmd_week(message: Message):
     await send_hw_page(message, "week")
- 
- 
+
+
 # ============ ТРИГЕРНЫЕ ФРАЗЫ ============
 # "нокент" — общая часть и для "Инокентий", и для правильного "Иннокентий" (с двумя Н),
 # поэтому сработает при любом написании имени.
 @router.message(F.text.func(lambda t: t is not None and "что на завтра" in t.lower()))
 async def trigger_tomorrow(message: Message):
     await send_hw_page(message, "tomorrow")
- 
- 
+
+
 @router.message(F.text.func(
     lambda t: t is not None and (
         ("нокент" in t.lower() and "дз" in t.lower())
@@ -870,9 +891,9 @@ async def trigger_tomorrow(message: Message):
 ))
 async def trigger_phrase(message: Message):
     await send_hw_page(message, "list")
- 
- 
- 
+
+
+
 # ============ ГОТОВО / УДАЛИТЬ — через команды ============
 @router.message(Command("done"))
 async def cmd_done(message: Message):
@@ -885,8 +906,8 @@ async def cmd_done(message: Message):
         await message.answer(f"✅ Задание #{hw_id} отмечено как выполненное!")
     else:
         await message.answer("❌ Задание с таким id не найдено.")
- 
- 
+
+
 @router.message(Command("dbinfo"))
 async def cmd_dbinfo(message: Message):
     """Диагностика: показывает, где именно бот хранит базу данных прямо сейчас
@@ -894,10 +915,10 @@ async def cmd_dbinfo(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
         await message.answer("🚫 Эта команда только для администратора.")
         return
- 
+
     exists = os.path.exists(DB_PATH)
     size = os.path.getsize(DB_PATH) if exists else 0
- 
+
     total_rows = 0
     error = None
     if exists:
@@ -909,7 +930,7 @@ async def cmd_dbinfo(message: Message):
             conn.close()
         except Exception as e:
             error = str(e)
- 
+
     lines = [
         "🔧 <b>Диагностика базы данных</b>",
         "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
@@ -922,8 +943,8 @@ async def cmd_dbinfo(message: Message):
     if error:
         lines.append(f"⚠️ Ошибка чтения: {esc(error)}")
     await message.answer("\n".join(lines))
- 
- 
+
+
 @router.message(Command("delete"))
 async def cmd_delete(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
@@ -938,8 +959,8 @@ async def cmd_delete(message: Message):
         await message.answer(f"🗑️ Задание #{hw_id} удалено.")
     else:
         await message.answer("❌ Задание с таким id не найдено.")
- 
- 
+
+
 # ============ ГОТОВО / УДАЛИТЬ / ФАЙЛЫ — через кнопки ============
 @router.callback_query(F.data.startswith("done:"))
 async def cb_done(callback: CallbackQuery):
@@ -951,8 +972,8 @@ async def cb_done(callback: CallbackQuery):
         await callback.answer("Задание не найдено", show_alert=True)
         return
     await callback.answer("Готово!")
- 
- 
+
+
 @router.callback_query(F.data.startswith("delete:"))
 async def cb_delete(callback: CallbackQuery):
     if ADMIN_ID is not None and callback.from_user.id != ADMIN_ID:
@@ -966,8 +987,8 @@ async def cb_delete(callback: CallbackQuery):
         await callback.answer("Задание не найдено", show_alert=True)
         return
     await callback.answer("Удалено")
- 
- 
+
+
 @router.callback_query(F.data.startswith("files:"))
 async def cb_files(callback: CallbackQuery):
     hw_id = int(callback.data.split(":")[1])
@@ -981,8 +1002,8 @@ async def cb_files(callback: CallbackQuery):
         else:
             await callback.message.answer_document(file_id, caption=f"📎 К заданию #{hw_id}")
     await callback.answer()
- 
- 
+
+
 @router.message(Command("files"))
 async def cmd_files(message: Message):
     parts = message.text.split()
@@ -999,8 +1020,8 @@ async def cmd_files(message: Message):
             await message.answer_photo(file_id, caption=f"📎 К заданию #{hw_id}")
         else:
             await message.answer_document(file_id, caption=f"📎 К заданию #{hw_id}")
- 
- 
+
+
 # ============ РЕДАКТИРОВАНИЕ ЗАДАНИЯ ============
 @router.callback_query(F.data.startswith("edit:"))
 async def cb_edit_start(callback: CallbackQuery):
@@ -1010,8 +1031,8 @@ async def cb_edit_start(callback: CallbackQuery):
         return
     await callback.message.answer("Что хотите изменить?", reply_markup=edit_choice_kb(hw_id))
     await callback.answer()
- 
- 
+
+
 @router.message(Command("edit"))
 async def cmd_edit(message: Message):
     parts = message.text.split()
@@ -1023,15 +1044,15 @@ async def cmd_edit(message: Message):
         await message.answer("❌ Задание с таким id не найдено.")
         return
     await message.answer("Что хотите изменить?", reply_markup=edit_choice_kb(hw_id))
- 
- 
+
+
 @router.callback_query(F.data == "edit_cancel")
 async def cb_edit_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("Отменено.")
     await callback.answer()
- 
- 
+
+
 @router.callback_query(F.data.startswith("editfield:"))
 async def cb_edit_field(callback: CallbackQuery, state: FSMContext):
     _, hw_id, field = callback.data.split(":")
@@ -1046,21 +1067,21 @@ async def cb_edit_field(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(prompts[field])
     await callback.answer()
- 
- 
+
+
 @router.message(EditHomework.waiting_value)
 async def process_edit_value(message: Message, state: FSMContext):
     data = await state.get_data()
     hw_id, field = data["hw_id"], data["field"]
     value = message.text.strip()
- 
+
     if field == "deadline":
         parsed = parse_date(value)
         if not parsed:
             await message.answer("❌ Не понял дату. Введите в формате ДД.ММ.ГГГГ или ДД.ММ.")
             return
         value = parsed
- 
+
     if update_field(hw_id, field, value):
         field_names = {"subject": "Предмет", "description": "Описание", "deadline": "Дедлайн"}
         shown_value = value
@@ -1070,12 +1091,12 @@ async def process_edit_value(message: Message, state: FSMContext):
     else:
         await message.answer("❌ Не удалось найти задание для изменения.")
     await state.clear()
- 
- 
+
+
 # ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
 # Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
 # триггеры списка дз и шаги добавления/редактирования задания.
- 
+
 def wants_ai_stop(message: Message) -> bool:
     """Фразы вроде 'спасибо'/'дякую'/'отключайся' — завершают активную сессию,
     без обращения к ИИ (чтобы не тратить запрос на простое прощание)."""
@@ -1092,14 +1113,15 @@ def wants_ai_stop(message: Message) -> bool:
         return True
     active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     return bool(active_until and datetime.now() < active_until)
- 
- 
+
+
 @router.message(wants_ai_stop)
 async def ai_stop(message: Message):
     AI_ACTIVE_UNTIL.pop(message.chat.id, None)
+    clear_history(message.chat.id)
     await message.answer("😊 Будь ласка! Звертайтесь знову, якщо що — просто покличте по імені.")
- 
- 
+
+
 def wants_ai(message: Message) -> bool:
     text = message.text or ""
     if not text or text.startswith("/"):
@@ -1121,15 +1143,15 @@ def wants_ai(message: Message) -> bool:
     if active_until and datetime.now() < active_until:
         return True
     return False
- 
- 
+
+
 @router.message(wants_ai)
 async def ai_freeform(message: Message):
     # Убираем обращение по имени из вопроса, чтобы не путать модель
     cleaned = re.sub(r"\b[иИ]н+окент\w*\b[\s,!:—-]*", "", message.text, flags=re.IGNORECASE).strip()
     await handle_ai_question(message, cleaned or message.text)
- 
- 
+
+
 # ============ НАПОМИНАНИЯ И АВТОУДАЛЕНИЕ ПРОСРОЧЕННЫХ ============
 async def send_reminders():
     rows = get_due_tomorrow_unreminded()
@@ -1143,8 +1165,8 @@ async def send_reminders():
             mark_reminded(hw_id)
         except Exception as e:
             logging.warning(f"Не удалось отправить напоминание {hw_id}: {e}")
- 
- 
+
+
 async def cleanup_overdue():
     """Каждый день в 17:00: если задание просрочено и никто не удалил его вручную,
     бот удаляет его сам и сообщает в чат, откуда оно было добавлено."""
@@ -1160,21 +1182,20 @@ async def cleanup_overdue():
                 )
             except Exception as e:
                 logging.warning(f"Не удалось уведомить об автоудалении {hw_id}: {e}")
- 
- 
+
+
 async def main():
     init_db()
     await set_bot_commands()
- 
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_reminders, "cron", hour=20, minute=0)
     scheduler.add_job(cleanup_overdue, "cron", hour=17, minute=0)
     scheduler.start()
- 
+
     logging.info("Бот запущен")
     await dp.start_polling(bot)
- 
- 
+
+
 if __name__ == "__main__":
     asyncio.run(main())
- 
