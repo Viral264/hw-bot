@@ -38,7 +38,8 @@ _admin_id_raw = os.getenv("ADMIN_ID", "").strip()
 ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else None
 # Для ИИ-консультанта (/ai) — бесплатный ключ с console.groq.com
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+# llama-3.3-70b-versatile отключена Groq 16.08.2026 — используем актуальную модель
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
  
 logging.basicConfig(level=logging.INFO)
  
