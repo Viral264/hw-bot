@@ -687,13 +687,23 @@ async def handle_ai_question(message: Message, raw: str):
                 f"Контекст задания #{hw_id}:\nПредмет: {subject}\nЗадание: {description}\n"
                 f"Дедлайн: {deadline}\n\nВопрос: {raw}"
             )
-            photo_files = [fid for fid, ftype in get_files(hw_id) if ftype == "photo"]
+            all_files = get_files(hw_id)
+            photo_files = [fid for fid, ftype in all_files if ftype == "photo"]
+            video_files = [(fid, ftype) for fid, ftype in all_files if ftype == "video"]
+
             if photo_files:
                 await message.answer(f"📎 Смотрю прикреплённые фото ({len(photo_files)} шт.)...")
                 for file_id in photo_files[:5]:
                     url = await download_photo_as_data_url(file_id)
                     if url:
                         image_urls.append(url)
+
+            if video_files:
+                # Видео ИИ не анализирует (не поддерживается и раздувает запрос) —
+                # просто пересылаем файл в чат, чтобы можно было посмотреть самому.
+                prompt += "\n\n(К заданию также прикреплено видео — я прислал(а) его отдельным сообщением.)"
+                for file_id, ftype in video_files:
+                    await send_hw_file(message, hw_id, file_id, ftype)
         else:
             await message.answer(f"❌ Задание #{hw_id} не найдено, отвечаю без контекста задания.")
 
@@ -799,6 +809,17 @@ async def process_attachment_document(message: Message, state: FSMContext):
     await message.answer("✅ Документ добавлен. Присылайте ещё, или нажмите «Готово».", reply_markup=files_done_kb())
 
 
+@router.message(AddHomework.attachment, F.video)
+async def process_attachment_video(message: Message, state: FSMContext):
+    data = await state.get_data()
+    add_file(data["hw_id"], message.video.file_id, "video")
+    await message.answer(
+        "✅ Видео добавлено. Присылайте ещё, или нажмите «Готово».\n"
+        "<i>ИИ видео не анализирует — просто пришлёт его в чат по запросу.</i>",
+        reply_markup=files_done_kb(),
+    )
+
+
 @router.callback_query(AddHomework.attachment, F.data == "finish_files")
 async def process_finish_files(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -821,7 +842,7 @@ async def process_finish_files(callback: CallbackQuery, state: FSMContext):
 @router.message(AddHomework.attachment)
 async def process_attachment_invalid(message: Message):
     await message.answer(
-        "Пришлите фото или документ, либо нажмите «✅ Готово, больше файлов нет» кнопкой выше."
+        "Пришлите фото, видео или документ, либо нажмите «✅ Готово, больше файлов нет» кнопкой выше."
     )
 
 
@@ -1054,6 +1075,16 @@ async def cb_delete(callback: CallbackQuery):
     await callback.answer("Удалено")
 
 
+async def send_hw_file(message: Message, hw_id: int, file_id: str, file_type: str):
+    caption = f"📎 К заданию #{hw_id}"
+    if file_type == "photo":
+        await message.answer_photo(file_id, caption=caption)
+    elif file_type == "video":
+        await message.answer_video(file_id, caption=caption)
+    else:
+        await message.answer_document(file_id, caption=caption)
+
+
 @router.callback_query(F.data.startswith("files:"))
 async def cb_files(callback: CallbackQuery):
     hw_id = int(callback.data.split(":")[1])
@@ -1062,10 +1093,7 @@ async def cb_files(callback: CallbackQuery):
         await callback.answer("Файлов нет", show_alert=True)
         return
     for file_id, file_type in files:
-        if file_type == "photo":
-            await callback.message.answer_photo(file_id, caption=f"📎 К заданию #{hw_id}")
-        else:
-            await callback.message.answer_document(file_id, caption=f"📎 К заданию #{hw_id}")
+        await send_hw_file(callback.message, hw_id, file_id, file_type)
     await callback.answer()
 
 
@@ -1081,10 +1109,7 @@ async def cmd_files(message: Message):
         await message.answer("📭 У этого задания нет файлов (или id не найден).")
         return
     for file_id, file_type in files:
-        if file_type == "photo":
-            await message.answer_photo(file_id, caption=f"📎 К заданию #{hw_id}")
-        else:
-            await message.answer_document(file_id, caption=f"📎 К заданию #{hw_id}")
+        await send_hw_file(message, hw_id, file_id, file_type)
 
 
 # ============ РЕДАКТИРОВАНИЕ ЗАДАНИЯ ============
