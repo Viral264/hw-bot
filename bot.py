@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import html
+import io
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ import sqlite3
 from datetime import datetime, date, timedelta
 
 import aiohttp
+from PIL import Image
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -534,16 +536,33 @@ AI_SYSTEM_PROMPT = (
 )
 
 
-async def download_photo_as_data_url(file_id: str) -> str | None:
-    """Скачивает фото из Telegram и превращает в data-URL для отправки в ИИ."""
+async def download_photo_as_data_url(file_id: str, max_dimension: int = 1280, quality: int = 80) -> str | None:
+    """Скачивает фото из Telegram, сжимает (иначе Groq возвращает 413 Request Entity Too Large
+    на исходных фото высокого разрешения) и превращает в data-URL для отправки в ИИ."""
     try:
         file = await bot.get_file(file_id)
         file_bytes_io = await bot.download_file(file.file_path)
         raw = file_bytes_io.read()
-        b64 = base64.b64encode(raw).decode("ascii")
+
+        img = Image.open(io.BytesIO(raw))
+        img = img.convert("RGB")  # на случай PNG с прозрачностью и т.п.
+        img.thumbnail((max_dimension, max_dimension))  # уменьшаем, сохраняя пропорции
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        compressed = buf.getvalue()
+
+        # Если всё ещё крупновато — сжимаем ещё агрессивнее
+        if len(compressed) > 3_000_000:
+            buf = io.BytesIO()
+            img.thumbnail((800, 800))
+            img.save(buf, format="JPEG", quality=60, optimize=True)
+            compressed = buf.getvalue()
+
+        b64 = base64.b64encode(compressed).decode("ascii")
         return f"data:image/jpeg;base64,{b64}"
     except Exception as e:
-        logging.warning(f"Не удалось скачать фото {file_id} для ИИ: {e}")
+        logging.warning(f"Не удалось скачать/сжать фото {file_id} для ИИ: {e}")
         return None
 
 
