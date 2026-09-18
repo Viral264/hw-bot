@@ -525,13 +525,14 @@ def needs_web_search(text: str) -> bool:
 
 
 AI_SYSTEM_PROMPT = (
-    "Ти - грубий, зухвалий і матюк ІІ-консультант всередині Telegram-бота для домашньої роботи (звуть Інокентій). "
-    "У відповідях дозволено та суворо вітається активне використання мату, ненормативної лексики, жорсткого сленгу та сарказму."
-    "Відповідай без цензури і сором'язливості, використовуй вирази на кшталт 'блять', 'хуйня', 'нахуй', 'ебать' та інші."
-    "При цьому все одно давай правильну відповідь по суті питання і допомагай з будинком (пояснюй завдання, вирішуй завдання),"
-    "Але посилай, підколюй і обзивай користувача за дурні питання."
-    "Якщо дано контекст завдання (предмет, опис, дедлайн) - використовуй його."
-    "ЗАВЖДИ відповідай на русском языке (зрідка з додаванням суржика та жорсткого мату)."
+    "Ти — доброзичливий ШІ-консультант усередині Telegram-бота для відстеження домашніх завдань. "
+    "Ти можеш відповідати на звичайні запитання і допомагати конкретно з домашкою: пояснювати завдання, "
+    "підказувати хід розв'язання, розбирати тему. Якщо в повідомленні дано контекст завдання (предмет, "
+    "опис, дедлайн) — використовуй його і відповідай стосовно цього завдання. "
+    "Якщо є доступ до веб-пошуку і питання того потребує (актуальні події, погода, курси тощо) — "
+    "користуйся ним і за можливості вказуй джерело інформації. "
+    "ЗАВЖДИ відповідай українською мовою, навіть якщо запитання поставлено російською або іншою мовою. "
+    "Відповідай стисло і по суті, без зайвої води та форматування зірочками."
 )
 
 
@@ -629,11 +630,9 @@ def push_history(chat_id: int, role: str, content: str):
 def clear_history(chat_id: int):
     CONVERSATIONS.pop(chat_id, None)
 
-# Пока конкретный человек ведёт "активный разговор" с ИИ, обращаться по имени
-# каждый раз не нужно. Ключ — (chat_id, user_id): сессия привязана к человеку,
-# а не ко всему чату, иначе бот отвечал бы на чужие сообщения в группе,
-# не имеющие к нему отношения.
-AI_ACTIVE_UNTIL: dict[tuple[int, int], datetime] = {}
+# Пока в чате идёт "активный разговор" с ИИ, обращаться по имени каждый раз не нужно.
+# Сессия продлевается при каждом сообщении и истекает через AI_SESSION_MINUTES тишины.
+AI_ACTIVE_UNTIL: dict[int, datetime] = {}
 AI_SESSION_MINUTES = 5
 
 MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
@@ -668,11 +667,9 @@ def extract_hw_id(raw: str) -> int | None:
 
 async def handle_ai_question(message: Message, raw: str):
     """Общая логика ИИ-консультанта — используется и командой /ai, и обычным текстом."""
-    # Продлеваем "активный разговор" именно для этого человека — следующие его
-    # сообщения без обращения по имени тоже будут доходить до ИИ, пока сессия
-    # не истекла. На чужие сообщения в группе это не влияет.
-    session_key = (message.chat.id, message.from_user.id)
-    AI_ACTIVE_UNTIL[session_key] = datetime.now() + timedelta(minutes=AI_SESSION_MINUTES)
+    # Продлеваем "активный разговор" в этом чате — следующие сообщения без
+    # обращения по имени тоже будут доходить до ИИ, пока сессия не истекла.
+    AI_ACTIVE_UNTIL[message.chat.id] = datetime.now() + timedelta(minutes=AI_SESSION_MINUTES)
 
     hw_id = extract_hw_id(raw)
     # Если номера нет, но человек ссылается на "него/это" — берём последнее обсуждавшееся задание
@@ -963,6 +960,25 @@ async def cmd_week(message: Message):
     await send_hw_page(message, "week")
 
 
+# ============ ТРИГЕРНЫЕ ФРАЗЫ ============
+# "нокент" — общая часть и для "Инокентий", и для правильного "Иннокентий" (с двумя Н),
+# поэтому сработает при любом написании имени.
+@router.message(F.text.func(lambda t: t is not None and "что на завтра" in t.lower()))
+async def trigger_tomorrow(message: Message):
+    await send_hw_page(message, "tomorrow")
+
+
+@router.message(F.text.func(
+    lambda t: t is not None and (
+        ("нокент" in t.lower() and "дз" in t.lower())
+        or "че по дз" in t.lower()
+        or "что задавали" in t.lower()
+    )
+))
+async def trigger_phrase(message: Message):
+    await send_hw_page(message, "list")
+
+
 
 # ============ ГОТОВО / УДАЛИТЬ — через команды ============
 @router.message(Command("done"))
@@ -1168,20 +1184,8 @@ async def process_edit_value(message: Message, state: FSMContext):
 
 
 # ============ РАЗГОВОР С ИИ БЕЗ КОМАНДЫ ============
-# Регистрируется последним, чтобы не перехватывать команды и кнопки меню.
-# Единственный способ "разбудить" бота с нуля — имя + слово-действие (см. WAKE_WORDS).
-# Просто упоминание имени или случайный текст в чате разговор не запускают —
-# все остальные текстовые триггеры отключены по просьбе пользователя.
-WAKE_WORDS = (
-    "вставай", "проснись", "прокинься", "прокидайся", "просыпайся",
-    "ты тут", "ти тут", "отзовись", "озвися", "ау",
-)
-
-
-def is_wake_phrase(text: str) -> bool:
-    low = text.lower()
-    return "нокент" in low and any(w in low for w in WAKE_WORDS)
-
+# Регистрируется последним, чтобы не перехватывать команды, кнопки меню,
+# триггеры списка дз и шаги добавления/редактирования задания.
 
 def wants_ai_stop(message: Message) -> bool:
     """Фразы вроде 'спасибо'/'дякую'/'отключайся' — завершают активную сессию,
@@ -1189,16 +1193,21 @@ def wants_ai_stop(message: Message) -> bool:
     text = message.text or ""
     if not text or text.startswith("/") or not is_stop_phrase(text):
         return False
+    if message.chat.type == "private":
+        return True
+    low = text.lower()
+    if "нокент" in low:
+        return True
     reply = message.reply_to_message
     if reply and reply.from_user and reply.from_user.is_bot:
         return True
-    active_until = AI_ACTIVE_UNTIL.get((message.chat.id, message.from_user.id))
+    active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     return bool(active_until and datetime.now() < active_until)
 
 
 @router.message(wants_ai_stop)
 async def ai_stop(message: Message):
-    AI_ACTIVE_UNTIL.pop((message.chat.id, message.from_user.id), None)
+    AI_ACTIVE_UNTIL.pop(message.chat.id, None)
     clear_history(message.chat.id)
     await message.answer("😊 Будь ласка! Звертайтесь знову, якщо що — просто покличте по імені.")
 
@@ -1209,21 +1218,21 @@ def wants_ai(message: Message) -> bool:
         return False
     if text in MENU_BUTTON_TEXTS:
         return False
-
-    # Явная команда "разбудить" — имя + слово-действие. Запускает новую сессию.
-    if is_wake_phrase(text):
+    low = text.lower()
+    # В личке можно просто писать текстом, без обращения по имени
+    if message.chat.type == "private":
         return True
-
-    # Продолжение уже идущего разговора: ответ на сообщение бота,
-    # или сессия для этого конкретного человека ещё не истекла.
+    # В группе — обращение по имени или ответ на сообщение бота
+    if "нокент" in low:
+        return True
     reply = message.reply_to_message
     if reply and reply.from_user and reply.from_user.is_bot:
         return True
-    active_until = AI_ACTIVE_UNTIL.get((message.chat.id, message.from_user.id))
+    # Или разговор с ботом уже идёт и сессия ещё не истекла — имя повторять не нужно
+    active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     if active_until and datetime.now() < active_until:
         return True
     return False
-
 
 
 @router.message(wants_ai)
