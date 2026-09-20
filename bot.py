@@ -47,9 +47,12 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 # состав моделей для картинок; если перестанет работать, поменяйте эту переменную на
 # актуальное имя с console.groq.com/docs/vision, код трогать не нужно.
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
-# Groq compound — модель со встроенным веб-поиском (сама решает, когда гуглить),
-# не требует отдельных ключей/API — работает на том же GROQ_API_KEY.
+# Groq compound — модель со встроенным веб-поиском. ВНИМАНИЕ: у Groq подтверждён баг —
+# compound/compound-mini падают с ошибкой 413 даже на простые запросы (см. форум Groq).
+# Поэтому поиск ниже сделан через Tavily напрямую, а не через эту модель.
 GROQ_COMPOUND_MODEL = os.getenv("GROQ_COMPOUND_MODEL", "groq/compound-mini").strip()
+# Веб-поиск — бесплатный ключ на tavily.com (1000 запросов/месяц), надёжнее compound-моделей Groq
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -97,6 +100,29 @@ def init_db():
             value TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mono_jars (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            link TEXT NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    # Если раньше была настроена ровно одна банка через старый /setmono (хранилась
+    # в settings как mono_link/mono_note) — переносим её в новую таблицу один раз.
+    cur.execute("SELECT COUNT(*) FROM mono_jars")
+    if cur.fetchone()[0] == 0:
+        cur.execute("SELECT value FROM settings WHERE key = 'mono_link'")
+        old_link = cur.fetchone()
+        if old_link and old_link[0]:
+            cur.execute("SELECT value FROM settings WHERE key = 'mono_note'")
+            old_note_row = cur.fetchone()
+            old_note = old_note_row[0] if old_note_row else "Банка"
+            cur.execute(
+                "INSERT OR IGNORE INTO mono_jars (name, link, note, created_at) VALUES (?, ?, ?, ?)",
+                (old_note or "банка", old_link[0], old_note, datetime.now().isoformat()),
+            )
     # Миграция со старых версий базы
     cur.execute("PRAGMA table_info(homework)")
     cols = [row[1] for row in cur.fetchall()]
@@ -176,6 +202,41 @@ def get_setting(key: str) -> str | None:
     row = cur.fetchone()
     conn.close()
     return row[0] if row else None
+
+
+# ============ БАНКИ MONOBANK (можно сколько угодно) ============
+def add_mono_jar(name: str, link: str, note: str | None = None) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO mono_jars (name, link, note, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET link = excluded.link, note = excluded.note",
+            (name, link, note, datetime.now().isoformat()),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_mono_jars() -> list[tuple[str, str, str | None]]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT name, link, note FROM mono_jars ORDER BY created_at ASC")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def remove_mono_jar(name: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM mono_jars WHERE name = ?", (name,))
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
 
 
 def get_homework(only_pending=True, days_ahead: int | None = None):
@@ -372,9 +433,10 @@ async def set_bot_commands():
         BotCommand(command="done", description="Отметить выполненным: /done <id>"),
         BotCommand(command="delete", description="Удалить задание: /delete <id>"),
         BotCommand(command="dbinfo", description="[admin] Диагностика базы данных"),
-        BotCommand(command="mono", description="Ссылка на банку"),
+        BotCommand(command="mono", description="Список банок"),
         BotCommand(command="ai", description="Спросить ИИ-консультанта"),
-        BotCommand(command="setmono", description="[admin] Указать ссылку на банку"),
+        BotCommand(command="addmono", description="[admin] Добавить банку"),
+        BotCommand(command="removemono", description="[admin] Удалить банку"),
         BotCommand(command="edit", description="Изменить задание: /edit <id>"),
         BotCommand(command="files", description="Показать файлы задания: /files <id>"),
     ]
@@ -471,41 +533,65 @@ async def cmd_start(message: Message):
 
 # ============ БАНКА (MONOBANK) ============
 def mono_message_text() -> str | None:
-    link = get_setting("mono_link")
-    if not link:
+    jars = get_mono_jars()
+    if not jars:
         return None
-    note = get_setting("mono_note") or "Тут банки"
-    return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти на банку</a>"
+    if len(jars) == 1:
+        name, link, note = jars[0]
+        title = note or name
+        return f"💳 <b>{esc(title)}</b>\n👉 <a href=\"{esc(link)}\">Перейти на банку</a>"
+    lines = ["💳 <b>Банки для поддержки:</b>", ""]
+    for name, link, note in jars:
+        title = note or name
+        lines.append(f"👉 <a href=\"{esc(link)}\">{esc(title)}</a>")
+    return "\n".join(lines)
 
 
 @router.message(Command("mono"))
 async def cmd_mono(message: Message):
     text = mono_message_text()
     if not text:
-        extra = "\nНастроить: /setmono <ссылка на банку>" if ADMIN_ID is None or message.from_user.id == ADMIN_ID else ""
-        await message.answer("📭 Ссылка на банку ещё не добавлена." + extra)
+        extra = "\nДобавить: /addmono <название> <ссылка> [подпись]" if ADMIN_ID is None or message.from_user.id == ADMIN_ID else ""
+        await message.answer("📭 Банки ещё не добавлены." + extra)
         return
     await message.answer(text, disable_web_page_preview=False)
 
 
-@router.message(Command("setmono"))
-async def cmd_setmono(message: Message):
+@router.message(Command("addmono"))
+async def cmd_addmono(message: Message):
     if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Настраивать банку может только администратор.")
+        await message.answer("🚫 Добавлять банки может только администратор.")
         return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 2:
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 3:
         await message.answer(
-            "Использование: /setmono <ссылка> [подпись]\n"
-            "Например:\n/setmono https://send.monobank.ua/jar/xxxxx Сбор на нужды группы"
+            "Использование: /addmono <название> <ссылка> [подпись]\n"
+            "Например:\n/addmono пицца https://send.monobank.ua/jar/xxxxx Сбор на пиццу\n\n"
+            "Можно добавлять сколько угодно банок — каждая со своим названием."
         )
         return
-    link = parts[1]
-    note = parts[2] if len(parts) > 2 else None
-    set_setting("mono_link", link)
-    if note:
-        set_setting("mono_note", note)
-    await message.answer("✅ Ссылка на банку сохранена. Проверить: /mono")
+    name, link = parts[1], parts[2]
+    note = parts[3] if len(parts) > 3 else None
+    add_mono_jar(name, link, note)
+    await message.answer(f"✅ Банка «{esc(name)}» сохранена. Проверить: /mono")
+
+
+@router.message(Command("removemono"))
+async def cmd_removemono(message: Message):
+    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Удалять банки может только администратор.")
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        jars = get_mono_jars()
+        names = ", ".join(name for name, _, _ in jars) or "нет банок"
+        await message.answer(f"Использование: /removemono <название>\nСейчас есть: {esc(names)}")
+        return
+    name = parts[1].strip()
+    if remove_mono_jar(name):
+        await message.answer(f"🗑️ Банка «{esc(name)}» удалена.")
+    else:
+        await message.answer(f"❌ Банка «{esc(name)}» не найдена.")
 
 
 # ============ ИИ-КОНСУЛЬТАНТ (/ai) ============
@@ -524,6 +610,41 @@ def needs_web_search(text: str) -> bool:
     return any(trigger in low for trigger in WEB_SEARCH_TRIGGERS)
 
 
+async def tavily_search(query: str, max_results: int = 5) -> list[dict]:
+    if not TAVILY_API_KEY:
+        raise RuntimeError(
+            "Веб-поиск не настроен. Нужна переменная TAVILY_API_KEY "
+            "(бесплатный ключ на tavily.com)."
+        )
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": "basic",
+    }
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post("https://api.tavily.com/search", json=payload) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                err = data.get("error", str(data))
+                raise RuntimeError(f"Ошибка Tavily ({resp.status}): {err}")
+            results = data.get("results", [])
+            return [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
+                for r in results
+            ]
+
+
+def format_search_results(results: list[dict]) -> str:
+    if not results:
+        return "Результати веб-пошуку: нічого не знайдено."
+    lines = ["Результати веб-пошуку:"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r['title']}\n{r['content']}\nДжерело: {r['url']}")
+    return "\n\n".join(lines)
+
+
 AI_SYSTEM_PROMPT = (
     "Ти - грубий, зухвалий і матюк ІІ-консультант всередині Telegram-бота для домашньої роботи (звуть Інокентій). "
     "У відповідях дозволено та суворо вітається активне використання мату, ненормативної лексики, жорсткого сленгу та сарказму."
@@ -537,6 +658,8 @@ AI_SYSTEM_PROMPT = (
  Не заменяй допустимые ругательства звёздочками.
 Не используй мат для угроз, травли или оскорбления защищённых групп."""
 "Твой отец это @Vlad687 а мать @tklslflh  его зовут Влад и Даша если спросят кто тебя создал отвечай что они "
+"Якщо в повідомленні є розділ 'Результати веб-пошуку' — це актуальна інформація з інтернету, "
+"спирайся на неї у відповіді та за можливості вкажи джерело."
 )
 
 
@@ -571,7 +694,7 @@ async def download_photo_as_data_url(file_id: str, max_dimension: int = 1280, qu
 
 
 async def ask_ai(user_text: str, image_data_urls: list[str] | None = None,
-                  history: list[dict] | None = None, use_search: bool = False) -> str:
+                  history: list[dict] | None = None) -> str:
     if not GROQ_API_KEY:
         raise RuntimeError(
             "ИИ-консультант не настроен. Администратору нужно получить бесплатный ключ на "
@@ -593,7 +716,7 @@ async def ask_ai(user_text: str, image_data_urls: list[str] | None = None,
         messages = [{"role": "user", "content": content}]
     else:
         # groq/compound сам решает, когда погуглить — отдельный API для поиска не нужен
-        model = GROQ_COMPOUND_MODEL if use_search else GROQ_MODEL
+        model = GROQ_MODEL  # обычная модель — веб-поиск уже подмешан в user_text через Tavily
         messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_text})
@@ -715,16 +838,22 @@ async def handle_ai_question(message: Message, raw: str):
         else:
             await message.answer(f"❌ Задание #{hw_id} не найдено, отвечаю без контекста задания.")
 
-    # Если вопрос похож на "найди", "актуальное", "новости" и т.п. — используем модель
-    # со встроенным веб-поиском (сама решит, гуглить ли, и что искать)
-    use_search = not image_urls and needs_web_search(raw)
-    if use_search:
+    # Если вопрос похож на "найди", "актуальное", "новости" и т.п. — сначала ищем
+    # через Tavily, а результаты подмешиваем в запрос к обычной модели (не через
+    # баговую groq/compound, см. комментарий у TAVILY_API_KEY выше)
+    if not image_urls and needs_web_search(raw):
         await message.answer("🔍 Ищу в интернете...")
+        try:
+            results = await tavily_search(raw)
+            prompt = f"{prompt}\n\n{format_search_results(results)}"
+        except Exception as e:
+            logging.warning(f"Ошибка веб-поиска: {e}")
+            await message.answer(f"⚠️ Не удалось выполнить поиск: {esc(str(e))}\nОтвечаю без него.")
 
     await bot.send_chat_action(message.chat.id, "typing")
     try:
         history = CONVERSATIONS.get(message.chat.id) if not image_urls else None
-        answer = await ask_ai(prompt, image_urls or None, history, use_search)
+        answer = await ask_ai(prompt, image_urls or None, history)
     except Exception as e:
         logging.warning(f"Ошибка ИИ-консультанта: {e}")
         await message.answer(f"⚠️ {esc(str(e))}")
