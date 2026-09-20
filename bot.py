@@ -1042,7 +1042,7 @@ def build_list_page(view: str, page: int):
     keyboard = list(files_buttons)
     if nav_row:
         keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")])
+    keyboard.append([InlineKeyboardButton(text="💳 Дэнежки", callback_data="mono_info")])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
