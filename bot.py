@@ -536,7 +536,7 @@ def mono_message_text() -> str | None:
         name, link, note = jars[0]
         title = note or name
         return f"💳 <b>{esc(title)}</b>\n👉 <a href=\"{esc(link)}\">Перейти на банку</a>"
-    lines = ["💳 <b>Банки:</b>", ""]
+    lines = ["💳 <b>Банки для поддержки:</b>", ""]
     for name, link, note in jars:
         title = note or name
         lines.append(f"👉 <a href=\"{esc(link)}\">{esc(title)}</a>")
@@ -753,11 +753,11 @@ def push_history(chat_id: int, role: str, content: str):
 def clear_history(chat_id: int):
     CONVERSATIONS.pop(chat_id, None)
 
-# Пока конкретный человек ведёт "активный разговор" с ИИ, обращаться по имени
-# каждый раз не нужно. Ключ — (chat_id, user_id): сессия привязана к человеку,
-# а не ко всему чату, иначе бот отвечал бы на чужие сообщения в группе,
-# не имеющие к нему отношения.
-AI_ACTIVE_UNTIL: dict[tuple[int, int], datetime] = {}
+# Пока в чате идёт "активный разговор" с ИИ, обращаться по имени каждый раз не нужно.
+# Ключ — chat_id: сессия общая на весь чат (не привязана к тому, кто именно её начал),
+# чтобы любой участник мог и продолжить разговор, и выключить его фразой "спасибо" —
+# а не только тот один человек, кто изначально разбудил бота.
+AI_ACTIVE_UNTIL: dict[int, datetime] = {}
 AI_SESSION_MINUTES = 5
 
 MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
@@ -792,11 +792,10 @@ def extract_hw_id(raw: str) -> int | None:
 
 async def handle_ai_question(message: Message, raw: str):
     """Общая логика ИИ-консультанта — используется и командой /ai, и обычным текстом."""
-    # Продлеваем "активный разговор" именно для этого человека — следующие его
-    # сообщения без обращения по имени тоже будут доходить до ИИ, пока сессия
-    # не истекла. На чужие сообщения в группе это не влияет.
-    session_key = (message.chat.id, message.from_user.id)
-    AI_ACTIVE_UNTIL[session_key] = datetime.now() + timedelta(minutes=AI_SESSION_MINUTES)
+    # Продлеваем "активный разговор" в этом чате — следующие сообщения (от любого
+    # участника) без обращения по имени тоже будут доходить до ИИ, пока сессия
+    # не истекла. Любой же участник может её и выключить фразой "спасибо".
+    AI_ACTIVE_UNTIL[message.chat.id] = datetime.now() + timedelta(minutes=AI_SESSION_MINUTES)
 
     hw_id = extract_hw_id(raw)
     # Если номера нет, но человек ссылается на "него/это" — берём последнее обсуждавшееся задание
@@ -1012,7 +1011,7 @@ def build_list_page(view: str, page: int):
     if not rows:
         text = f"🎉 <b>{esc(VIEW_EMPTY.get(view, 'Пусто'))}</b>"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Банки ", callback_data="mono_info")]
+            [InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")]
         ])
         return text, kb
 
@@ -1042,7 +1041,7 @@ def build_list_page(view: str, page: int):
     keyboard = list(files_buttons)
     if nav_row:
         keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton(text="💳 Банки ", callback_data="mono_info")])
+    keyboard.append([InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -1322,13 +1321,13 @@ def wants_ai_stop(message: Message) -> bool:
     reply = message.reply_to_message
     if reply and reply.from_user and reply.from_user.is_bot:
         return True
-    active_until = AI_ACTIVE_UNTIL.get((message.chat.id, message.from_user.id))
+    active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     return bool(active_until and datetime.now() < active_until)
 
 
 @router.message(wants_ai_stop)
 async def ai_stop(message: Message):
-    AI_ACTIVE_UNTIL.pop((message.chat.id, message.from_user.id), None)
+    AI_ACTIVE_UNTIL.pop(message.chat.id, None)
     clear_history(message.chat.id)
     await message.answer("😊 Будь ласка! Звертайтесь знову, якщо що — просто покличте по імені.")
 
@@ -1345,11 +1344,11 @@ def wants_ai(message: Message) -> bool:
         return True
 
     # Продолжение уже идущего разговора: ответ на сообщение бота,
-    # или сессия для этого конкретного человека ещё не истекла.
+    # или сессия в этом чате ещё не истекла (любой участник может продолжить).
     reply = message.reply_to_message
     if reply and reply.from_user and reply.from_user.is_bot:
         return True
-    active_until = AI_ACTIVE_UNTIL.get((message.chat.id, message.from_user.id))
+    active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     if active_until and datetime.now() < active_until:
         return True
     return False
