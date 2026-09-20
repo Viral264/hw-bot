@@ -475,7 +475,7 @@ def mono_message_text() -> str | None:
     if not link:
         return None
     note = get_setting("mono_note") or "На поддержку Инокентия"
-    return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти в Monobank</a>"
+    return f"💳 <b>{esc(note)}</b>\n👉 <a href=\"{esc(link)}\">Перейти на банку</a>"
 
 
 @router.message(Command("mono"))
