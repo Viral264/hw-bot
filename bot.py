@@ -1012,7 +1012,7 @@ def build_list_page(view: str, page: int):
     if not rows:
         text = f"🎉 <b>{esc(VIEW_EMPTY.get(view, 'Пусто'))}</b>"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")]
+            [InlineKeyboardButton(text="💳 Банки ", callback_data="mono_info")]
         ])
         return text, kb
 
@@ -1042,7 +1042,7 @@ def build_list_page(view: str, page: int):
     keyboard = list(files_buttons)
     if nav_row:
         keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")])
+    keyboard.append([InlineKeyboardButton(text="💳 Банки ", callback_data="mono_info")])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
