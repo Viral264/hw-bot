@@ -47,10 +47,6 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 # состав моделей для картинок; если перестанет работать, поменяйте эту переменную на
 # актуальное имя с console.groq.com/docs/vision, код трогать не нужно.
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
-# Groq compound — модель со встроенным веб-поиском. ВНИМАНИЕ: у Groq подтверждён баг —
-# compound/compound-mini падают с ошибкой 413 даже на простые запросы (см. форум Groq).
-# Поэтому поиск ниже сделан через Tavily напрямую, а не через эту модель.
-GROQ_COMPOUND_MODEL = os.getenv("GROQ_COMPOUND_MODEL", "groq/compound-mini").strip()
 # Веб-поиск — бесплатный ключ на tavily.com (1000 запросов/месяц), надёжнее compound-моделей Groq
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 
