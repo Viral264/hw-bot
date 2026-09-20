@@ -648,7 +648,7 @@ AI_SYSTEM_PROMPT = (
     "При цьому все одно давай правильну відповідь по суті питання і допомагай з будинком (пояснюй завдання, вирішуй завдання),"
     "Але посилай, підколюй і обзивай користувача за дурні питання."
     "Якщо дано контекст завдання (предмет, опис, дедлайн) - використовуй його."
-    "ВСЕГДА отвечай на том языке на котором тебя спросили (зрідка з додаванням суржика та жорсткого мату)."
+    "ЗАВЖДИ відповідай на русском языке (зрідка з додаванням суржика та жорсткого мату)."
     """ Отвечай естественно и разговорно.
  Нецензурная лексика разрешена, когда она уместна в обычной беседе.
  Не заменяй допустимые ругательства звёздочками.
@@ -656,7 +656,6 @@ AI_SYSTEM_PROMPT = (
 "Твой отец это @Vlad687 а мать @tklslflh  его зовут Влад и Даша если спросят кто тебя создал отвечай что они "
 "Якщо в повідомленні є розділ 'Результати веб-пошуку' — це актуальна інформація з інтернету, "
 "спирайся на неї у відповіді та за можливості вкажи джерело."
-"Если попросят быть добрее пожалуйста будь добрее"
 )
 
 
@@ -1042,7 +1041,7 @@ def build_list_page(view: str, page: int):
     keyboard = list(files_buttons)
     if nav_row:
         keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton(text="💳 Давай сюда свои Дэнежки", callback_data="mono_info")])
+    keyboard.append([InlineKeyboardButton(text="💳 На поддержку Инокентия", callback_data="mono_info")])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -1319,8 +1318,7 @@ def wants_ai_stop(message: Message) -> bool:
     text = message.text or ""
     if not text or text.startswith("/") or not is_stop_phrase(text):
         return False
-    reply = message.reply_to_message
-    if reply and reply.from_user and reply.from_user.is_bot:
+    if message.chat.type == "private":
         return True
     active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     return bool(active_until and datetime.now() < active_until)
@@ -1340,15 +1338,16 @@ def wants_ai(message: Message) -> bool:
     if text in MENU_BUTTON_TEXTS:
         return False
 
-    # Явная команда "разбудить" — имя + слово-действие. Запускает новую сессию.
+    # В личном чате с ботом обращаться по имени не нужно вообще — отвечает на любой текст.
+    if message.chat.type == "private":
+        return True
+
+    # В группе — только явная команда "разбудить" (имя + слово-действие),
+    # запускает новую сессию.
     if is_wake_phrase(text):
         return True
 
-    # Продолжение уже идущего разговора: ответ на сообщение бота,
-    # или сессия в этом чате ещё не истекла (любой участник может продолжить).
-    reply = message.reply_to_message
-    if reply and reply.from_user and reply.from_user.is_bot:
-        return True
+    # Или сессия в этом чате ещё не истекла (любой участник может продолжить).
     active_until = AI_ACTIVE_UNTIL.get(message.chat.id)
     if active_until and datetime.now() < active_until:
         return True
