@@ -536,7 +536,7 @@ def mono_message_text() -> str | None:
         name, link, note = jars[0]
         title = note or name
         return f"💳 <b>{esc(title)}</b>\n👉 <a href=\"{esc(link)}\">Перейти на банку</a>"
-    lines = ["💳 <b>Банки для поддержки:</b>", ""]
+    lines = ["💳 <b>Банки:</b>", ""]
     for name, link, note in jars:
         title = note or name
         lines.append(f"👉 <a href=\"{esc(link)}\">{esc(title)}</a>")
