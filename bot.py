@@ -39,6 +39,12 @@ DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "homework
 # Узнать свой id можно у бота @userinfobot. Задаётся переменной окружения ADMIN_ID.
 _admin_id_raw = os.getenv("ADMIN_ID", "").strip()
 ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else None
+# Доп. пароль на админ-команды (необязательно). Если задать переменную ADMIN_PASSWORD —
+# перед /delete, /addmono, /removemono, /dbinfo и /admin нужно будет один раз ввести пароль
+# через /admin, дальше доступ действует ADMIN_SESSION_MINUTES. Если переменная не задана —
+# проверки по паролю нет, работает только проверка по ADMIN_ID, как раньше.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+ADMIN_SESSION_MINUTES = 15
 # Для ИИ-консультанта (/ai) — бесплатный ключ с console.groq.com
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 # llama-3.3-70b-versatile отключена Groq 16.08.2026 — используем актуальную модель
@@ -428,6 +434,7 @@ async def set_bot_commands():
         BotCommand(command="week", description="Задания на неделю"),
         BotCommand(command="done", description="Отметить выполненным: /done <id>"),
         BotCommand(command="delete", description="Удалить задание: /delete <id>"),
+        BotCommand(command="admin", description="[admin] Открыть админ-панель"),
         BotCommand(command="dbinfo", description="[admin] Диагностика базы данных"),
         BotCommand(command="mono", description="Список банок"),
         BotCommand(command="ai", description="Спросить ИИ-консультанта"),
@@ -450,6 +457,42 @@ class AddHomework(StatesGroup):
 # ============ FSM: РЕДАКТИРОВАНИЕ ДЗ ============
 class EditHomework(StatesGroup):
     waiting_value = State()
+
+
+# ============ FSM: ВХОД В АДМИН-ПАНЕЛЬ ============
+class AdminAuth(StatesGroup):
+    waiting_password = State()
+
+
+# Сессии авторизованных админов: user_id -> до какого момента доступ действует
+ADMIN_SESSIONS: dict[int, datetime] = {}
+
+
+def is_admin_id(user_id: int) -> bool:
+    """Проверка только по Telegram ID — базовый уровень защиты (как было раньше)."""
+    return ADMIN_ID is None or user_id == ADMIN_ID
+
+
+def is_admin_authenticated(user_id: int) -> bool:
+    """Полная проверка: правильный ID и (если задан пароль) действующая сессия входа."""
+    if not is_admin_id(user_id):
+        return False
+    if not ADMIN_PASSWORD:
+        return True  # пароль не настроен — достаточно ID, как раньше
+    until = ADMIN_SESSIONS.get(user_id)
+    return bool(until and datetime.now() < until)
+
+
+async def ensure_admin(message: Message) -> bool:
+    """Проверяет доступ к админ-команде. Если доступа нет — сама отвечает отказом
+    и возвращает False (вызывающий код должен в этом случае прервать выполнение)."""
+    if not is_admin_id(message.from_user.id):
+        await message.answer("🚫 Эта команда только для администратора.")
+        return False
+    if ADMIN_PASSWORD and not is_admin_authenticated(message.from_user.id):
+        await message.answer("🔒 Сначала подтвердите доступ: наберите /admin и введите пароль.")
+        return False
+    return True
 
 
 def parse_date(text: str) -> str | None:
@@ -555,8 +598,7 @@ async def cmd_mono(message: Message):
 
 @router.message(Command("addmono"))
 async def cmd_addmono(message: Message):
-    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Добавлять банки может только администратор.")
+    if not await ensure_admin(message):
         return
     parts = message.text.split(maxsplit=3)
     if len(parts) < 3:
@@ -574,8 +616,7 @@ async def cmd_addmono(message: Message):
 
 @router.message(Command("removemono"))
 async def cmd_removemono(message: Message):
-    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Удалять банки может только администратор.")
+    if not await ensure_admin(message):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
@@ -1107,14 +1148,108 @@ async def cmd_done(message: Message):
         await message.answer("❌ Задание с таким id не найдено.")
 
 
+# ============ АДМИН-ПАНЕЛЬ ============
+def admin_panel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🩺 Диагностика базы", callback_data="panel_dbinfo")],
+        [InlineKeyboardButton(text="💳 Список банок", callback_data="panel_monolist")],
+        [InlineKeyboardButton(text="➕ Как добавить банку", callback_data="panel_addmono_help")],
+        [InlineKeyboardButton(text="🗑 Как удалить банку", callback_data="panel_removemono_help")],
+        [InlineKeyboardButton(text="🗑 Как удалить задание", callback_data="panel_delete_help")],
+        [InlineKeyboardButton(text="🔒 Завершить сессию", callback_data="panel_logout")],
+    ])
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    if not is_admin_id(message.from_user.id):
+        await message.answer("🚫 Эта команда только для администратора.")
+        return
+    if not ADMIN_PASSWORD:
+        # Пароль не настроен — сразу открываем панель, доступ уже подтверждён по ID
+        await message.answer("🔧 Админ-панель:", reply_markup=admin_panel_kb())
+        return
+    if is_admin_authenticated(message.from_user.id):
+        await message.answer("🔧 Админ-панель:", reply_markup=admin_panel_kb())
+        return
+    await state.set_state(AdminAuth.waiting_password)
+    await message.answer("🔒 Введите пароль администратора:")
+
+
+@router.message(AdminAuth.waiting_password)
+async def process_admin_password(message: Message, state: FSMContext):
+    await state.clear()
+    if message.text.strip() == ADMIN_PASSWORD:
+        ADMIN_SESSIONS[message.from_user.id] = datetime.now() + timedelta(minutes=ADMIN_SESSION_MINUTES)
+        await message.answer(
+            f"✅ Доступ подтверждён на {ADMIN_SESSION_MINUTES} минут.",
+            reply_markup=admin_panel_kb(),
+        )
+    else:
+        await message.answer("❌ Неверный пароль.")
+
+
+@router.callback_query(F.data == "panel_dbinfo")
+async def panel_dbinfo(callback: CallbackQuery):
+    if not is_admin_authenticated(callback.from_user.id):
+        await callback.answer("Сессия истекла, введите /admin заново", show_alert=True)
+        return
+    await callback.message.answer(build_dbinfo_text())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "panel_monolist")
+async def panel_monolist(callback: CallbackQuery):
+    if not is_admin_authenticated(callback.from_user.id):
+        await callback.answer("Сессия истекла, введите /admin заново", show_alert=True)
+        return
+    text = mono_message_text() or "📭 Банки ещё не добавлены."
+    await callback.message.answer(text)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "panel_addmono_help")
+async def panel_addmono_help(callback: CallbackQuery):
+    await callback.message.answer(
+        "Использование:\n<code>/addmono название ссылка [подпись]</code>\n"
+        "Например:\n<code>/addmono пицца https://send.monobank.ua/jar/xxxxx Сбор на пиццу</code>"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "panel_removemono_help")
+async def panel_removemono_help(callback: CallbackQuery):
+    jars = get_mono_jars()
+    names = ", ".join(name for name, _, _ in jars) or "нет банок"
+    await callback.message.answer(
+        f"Использование:\n<code>/removemono название</code>\nСейчас есть: {esc(names)}"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "panel_delete_help")
+async def panel_delete_help(callback: CallbackQuery):
+    await callback.message.answer("Использование:\n<code>/delete id</code>\nНапример: <code>/delete 5</code>")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "panel_logout")
+async def panel_logout(callback: CallbackQuery):
+    ADMIN_SESSIONS.pop(callback.from_user.id, None)
+    await callback.message.edit_text("🔒 Сессия завершена. Для входа снова наберите /admin.")
+    await callback.answer()
+
+
 @router.message(Command("dbinfo"))
 async def cmd_dbinfo(message: Message):
     """Диагностика: показывает, где именно бот хранит базу данных прямо сейчас
     и сколько там записей — помогает найти проблему с Volume/DB_PATH на Railway."""
-    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Эта команда только для администратора.")
+    if not await ensure_admin(message):
         return
+    await message.answer(build_dbinfo_text())
 
+
+def build_dbinfo_text() -> str:
     exists = os.path.exists(DB_PATH)
     size = os.path.getsize(DB_PATH) if exists else 0
 
@@ -1141,13 +1276,12 @@ async def cmd_dbinfo(message: Message):
     ]
     if error:
         lines.append(f"⚠️ Ошибка чтения: {esc(error)}")
-    await message.answer("\n".join(lines))
+    return "\n".join(lines)
 
 
 @router.message(Command("delete"))
 async def cmd_delete(message: Message):
-    if ADMIN_ID is not None and message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Удалять задания может только администратор бота.")
+    if not await ensure_admin(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
@@ -1175,8 +1309,8 @@ async def cb_done(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("delete:"))
 async def cb_delete(callback: CallbackQuery):
-    if ADMIN_ID is not None and callback.from_user.id != ADMIN_ID:
-        await callback.answer("🚫 Удалять задания может только администратор", show_alert=True)
+    if not is_admin_authenticated(callback.from_user.id):
+        await callback.answer("🚫 Удалять задания может только администратор (введите /admin)", show_alert=True)
         return
     hw_id = int(callback.data.split(":")[1])
     who = display_name(callback.from_user)
