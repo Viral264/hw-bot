@@ -1,5 +1,4 @@
-import asyncio
-import base64
+mport base64
 import html
 import io
 import logging
@@ -146,8 +145,102 @@ def init_db():
                 "INSERT INTO homework_files (hw_id, file_id, file_type) VALUES (?, ?, ?)",
                 (hw_id, file_id, file_type or "document"),
             )
+    # Пользователи и игровая прогрессия — отдельный слой, не ломает старую базу homework.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            xp INTEGER DEFAULT 0,
+            streak INTEGER DEFAULT 0,
+            last_activity TEXT,
+            referred_by INTEGER,
+            referrals INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS xp_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
+
+
+def register_user(user, referral_id: int | None = None) -> tuple[int, bool]:
+    """Регистрирует пользователя и обновляет ежедневную серию. Возвращает (streak, is_new)."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    now = datetime.now()
+    today = now.date().isoformat()
+    cur.execute("SELECT xp, streak, last_activity, referred_by FROM users WHERE telegram_id = ?", (user.id,))
+    row = cur.fetchone()
+    is_new = row is None
+    if is_new:
+        cur.execute(
+            "INSERT INTO users (telegram_id, username, full_name, xp, streak, last_activity, referred_by, referrals, created_at) VALUES (?, ?, ?, 0, 1, ?, ?, 0, ?)",
+            (user.id, user.username, user.full_name, today, referral_id if referral_id and referral_id != user.id else None, now.isoformat()),
+        )
+        if referral_id and referral_id != user.id:
+            cur.execute("UPDATE users SET referrals = referrals + 1 WHERE telegram_id = ?", (referral_id,))
+            cur.execute("UPDATE users SET xp = xp + 50 WHERE telegram_id = ?", (referral_id,))
+            cur.execute("INSERT INTO xp_events (telegram_id, amount, reason, created_at) VALUES (?, 50, 'Приглашён новый пользователь', ?)", (referral_id, now.isoformat()))
+    else:
+        _, streak, last_activity, _ = row
+        if last_activity != today:
+            prev = date.fromisoformat(last_activity) if last_activity else None
+            if prev and (date.today() - prev).days == 1:
+                streak = (streak or 0) + 1
+            else:
+                streak = 1
+            cur.execute("UPDATE users SET streak = ?, last_activity = ?, username = ?, full_name = ? WHERE telegram_id = ?", (streak, today, user.username, user.full_name, user.id))
+    conn.commit()
+    cur.execute("SELECT streak FROM users WHERE telegram_id = ?", (user.id,))
+    streak = cur.fetchone()[0]
+    conn.close()
+    return streak, is_new
+
+
+def add_xp(telegram_id: int, amount: int, reason: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO users (telegram_id, full_name, created_at) VALUES (?, '', ?)", (telegram_id, datetime.now().isoformat()))
+    cur.execute("UPDATE users SET xp = MAX(0, xp + ?) WHERE telegram_id = ?", (amount, telegram_id))
+    cur.execute("INSERT INTO xp_events (telegram_id, amount, reason, created_at) VALUES (?, ?, ?, ?)", (telegram_id, amount, reason, datetime.now().isoformat()))
+    cur.execute("SELECT xp FROM users WHERE telegram_id = ?", (telegram_id,))
+    xp = cur.fetchone()[0]
+    conn.commit(); conn.close()
+    return xp
+
+
+def get_profile(telegram_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT telegram_id, username, full_name, xp, streak, referrals FROM users WHERE telegram_id = ?", (telegram_id,))
+    row = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM users WHERE xp > COALESCE((SELECT xp FROM users WHERE telegram_id = ?), 0)", (telegram_id,))
+    rank = cur.fetchone()[0] + 1
+    conn.close()
+    return row, rank
+
+
+def get_top_users(limit: int = 10):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT username, full_name, xp, streak FROM users ORDER BY xp DESC, streak DESC LIMIT ?", (limit,))
+    rows = cur.fetchall(); conn.close(); return rows
+
+
+def xp_level(xp: int) -> tuple[int, int]:
+    level = max(1, xp // 100 + 1)
+    next_xp = level * 100
+    return level, next_xp
 
 
 def add_homework(chat_id: int, added_by: str, subject: str, description: str, deadline: str) -> int:
@@ -391,9 +484,11 @@ def ai_answer_to_html(text: str) -> str:
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📋 Список")],
-            [KeyboardButton(text="🔥 Сегодня"), KeyboardButton(text="📅 На завтра")],
-            [KeyboardButton(text="📆 Неделя")],
+            [KeyboardButton(text="🏠 Главная"), KeyboardButton(text="📚 Задания")],
+            [KeyboardButton(text="🔥 Сегодня"), KeyboardButton(text="📅 Завтра")],
+            [KeyboardButton(text="📆 Неделя"), KeyboardButton(text="➕ Добавить")],
+            [KeyboardButton(text="🏆 Профиль"), KeyboardButton(text="👥 Пригласить")],
+            [KeyboardButton(text="🤖 Инокентий")],
         ],
         resize_keyboard=True,
     )
@@ -442,6 +537,9 @@ async def set_bot_commands():
         BotCommand(command="removemono", description="[admin] Удалить банку"),
         BotCommand(command="edit", description="Изменить задание: /edit <id>"),
         BotCommand(command="files", description="Показать файлы задания: /files <id>"),
+        BotCommand(command="profile", description="Профиль, XP и серия дней"),
+        BotCommand(command="rating", description="Рейтинг пользователей"),
+        BotCommand(command="invite", description="Пригласить друзей"),
     ]
     await bot.set_my_commands(commands)
 
@@ -542,32 +640,108 @@ def format_hw_line(hw_id, subject, description, deadline, done, added_by=None, d
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     is_group = message.chat.type in ("group", "supergroup")
+    referral_id = None
+    if message.text and " " in message.text:
+        payload = message.text.split(" ", 1)[1].strip()
+        if payload.startswith("ref_") and payload[4:].isdigit():
+            referral_id = int(payload[4:])
+    streak, is_new = register_user(message.from_user, referral_id)
     if is_group:
         await message.answer(
-            "👋 <b>Привет!</b>\n"
-            "Список домашних заданий — общий для всех.\n\n"
-            "<b>Доступно в этом чате:</b>\n"
-            "📋 /list — посмотреть список\n"
-            "🔥 /today — что сдавать сегодня\n"
-            "📅 /tomorrow — что сдавать завтра\n"
-            "📆 /week — что сдавать на неделе\n\n"
-            "✏️ <i>Добавлять новые задания можно только в личном чате со мной.</i>"
+            "👋 <b>Инокентий подключён!</b>\n\n"
+            "📚 Здесь можно смотреть задания класса, а в личке доступны профиль, XP, серия дней и ИИ.\n\n"
+            "📋 /list — задания\n🔥 /today — на сегодня\n📆 /week — на неделю\n🤖 /ai — спросить Инокентия\n\n"
+            "💡 Добавьте бота в чат класса и отправьте друзьям ссылку из /invite."
         )
         return
+    level, next_xp = xp_level(get_profile(message.from_user.id)[0][3] if get_profile(message.from_user.id)[0] else 0)
+    bonus = "\n🎁 Твой реферальный бонус активирован!" if referral_id and is_new else ""
     await message.answer(
-        "👋 <b>Привет! Я бот для отслеживания домашних заданий.</b>\n\n"
-        "<b>Основное — кнопками внизу или командами:</b>\n"
-        "➕ /add — добавить дз\n"
-        "📋 /list — список невыполненных дз\n"
-        "🔥 /today — что сдавать сегодня\n"
-        "📅 /tomorrow — что сдавать завтра\n"
-        "📆 /week — что сдавать на неделе\n\n"
-        "📎 <i>К заданию можно прикрепить сразу несколько файлов, а потом "
-        "отредактировать предмет, описание или дедлайн в любой момент.</i>\n\n"
-        "📢 <b>Добавь меня в общий чат класса</b> — там все смогут смотреть список "
-        "командой /list, а добавлять новые задания сможешь только ты, в этой личке.",
+        "🚀 <b>Инокентий 2.0</b>\n\n"
+        "Я не просто список ДЗ — я твой учебный центр.\n"
+        f"🔥 Серия: <b>{streak} дн.</b> · ⭐ Уровень: <b>{level}</b>\n\n"
+        "📚 Задания и дедлайны\n🤖 ИИ-помощник\n🏆 XP и рейтинг\n👥 Приглашения друзей\n\n"
+        "Начни с «📚 Задания» или пригласи одногруппников." + bonus,
         reply_markup=main_menu_kb(),
     )
+
+
+# ============ РОСТ / ПРОФИЛЬ / РЕФЕРАЛЫ ============
+def dashboard_text(user_id: int) -> str:
+    row, rank = get_profile(user_id)
+    if not row:
+        return "Профиль ещё не создан. Нажмите /start."
+    _, username, full_name, xp, streak, referrals = row
+    level, next_xp = xp_level(xp)
+    pending = len(get_homework())
+    today_count = len(get_homework(days_ahead=0))
+    name = username and f"@{username}" or full_name
+    return (
+        f"🏠 <b>{esc(name)}</b>\n\n"
+        f"⭐ XP: <b>{xp}</b> · уровень <b>{level}</b>\n"
+        f"📈 До следующего уровня: <b>{max(0, next_xp - xp)} XP</b>\n"
+        f"🔥 Серия: <b>{streak} дн.</b>\n"
+        f"🏆 Место в рейтинге: <b>#{rank}</b>\n"
+        f"👥 Приглашено: <b>{referrals}</b>\n\n"
+        f"📚 Невыполненных заданий: <b>{pending}</b>\n"
+        f"🔥 На сегодня: <b>{today_count}</b>\n\n"
+        "💡 Выполняй задания и приглашай друзей — за активность растёт XP."
+    )
+
+
+@router.message(F.text == "🏠 Главная")
+async def menu_home(message: Message):
+    register_user(message.from_user)
+    await message.answer(dashboard_text(message.from_user.id), reply_markup=main_menu_kb())
+
+
+@router.message(F.text == "🏆 Профиль")
+@router.message(Command("profile"))
+async def cmd_profile(message: Message):
+    register_user(message.from_user)
+    await message.answer(dashboard_text(message.from_user.id), reply_markup=main_menu_kb())
+
+
+@router.message(F.text == "👥 Пригласить")
+@router.message(Command("invite"))
+async def cmd_invite(message: Message):
+    register_user(message.from_user)
+    me = await bot.me()
+    link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
+    await message.answer(
+        "👥 <b>Пригласи друзей</b>\n\n"
+        "Отправь эту ссылку одногруппникам.\n"
+        "За каждого нового пользователя ты получаешь <b>+50 XP</b>.\n\n"
+        f"🔗 <code>{esc(link)}</code>\n\n"
+        "Чем больше активных пользователей — тем полезнее общий учебный бот.",
+    )
+
+
+@router.message(F.text == "🤖 Инокентий")
+async def menu_ai(message: Message):
+    register_user(message.from_user)
+    await message.answer(
+        "🤖 <b>Инокентий на связи.</b>\n\n"
+        "Напиши вопрос следующим сообщением — помогу разобрать тему, задание или фото.\n\n"
+        "Примеры: «объясни производную», «реши №13», «что здесь на фото?»"
+    )
+
+
+@router.message(Command("rating"))
+async def cmd_rating(message: Message):
+    register_user(message.from_user)
+    rows = get_top_users(10)
+    if not rows:
+        await message.answer("🏆 Рейтинг пока пуст.")
+        return
+    lines = ["🏆 <b>Рейтинг Инокентия</b>", ""]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (username, full_name, xp, streak) in enumerate(rows, 1):
+        name = username and f"@{username}" or full_name or "Пользователь"
+        prefix = medals[i-1] if i <= 3 else f"{i}."
+        lines.append(f"{prefix} <b>{esc(name)}</b> — {xp} XP · 🔥 {streak}")
+    lines.append("\n💡 XP можно получать за активность и приглашения.")
+    await message.answer("\n".join(lines))
 
 
 # ============ БАНКА (MONOBANK) ============
@@ -801,7 +975,7 @@ def clear_history(chat_id: int):
 AI_ACTIVE_UNTIL: dict[int, datetime] = {}
 AI_SESSION_MINUTES = 5
 
-MENU_BUTTON_TEXTS = {"➕ Добавить", "📋 Список", "🔥 Сегодня", "📅 На завтра", "📆 Неделя"}
+MENU_BUTTON_TEXTS = {"🏠 Главная", "📚 Задания", "🔥 Сегодня", "📅 Завтра", "📆 Неделя", "➕ Добавить", "🏆 Профиль", "👥 Пригласить", "🤖 Инокентий"}
 
 # Фразы, после которых бот сам завершает активную сессию разговора — дальше снова
 # нужно обращаться по имени, чтобы не отвечать на посторонние сообщения в чате.
@@ -930,6 +1104,7 @@ async def cmd_add_blocked_in_group(message: Message):
 @router.message(Command("add"))
 @router.message(F.text == "➕ Добавить")
 async def cmd_add(message: Message, state: FSMContext):
+    register_user(message.from_user)
     await state.set_state(AddHomework.subject)
     await message.answer("📚 По какому предмету задание?")
 
@@ -1008,7 +1183,8 @@ async def process_finish_files(callback: CallbackQuery, state: FSMContext):
     if files_count:
         text += f"\n📎 Прикреплено файлов: {files_count}"
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(text, reply_markup=main_menu_kb())
+    add_xp(callback.from_user.id, 10, "Добавлено домашнее задание")
+    await callback.message.answer(text + "\n⭐ +10 XP за добавление задания", reply_markup=main_menu_kb())
     await callback.answer()
 
 
@@ -1110,7 +1286,7 @@ async def cb_mono_info(callback: CallbackQuery):
 
 
 @router.message(Command("list"))
-@router.message(F.text == "📋 Список")
+@router.message(F.text == "📚 Задания")
 async def cmd_list(message: Message):
     await send_hw_page(message, "list")
 
@@ -1122,7 +1298,7 @@ async def cmd_today(message: Message):
 
 
 @router.message(Command("tomorrow"))
-@router.message(F.text == "📅 На завтра")
+@router.message(F.text == "📅 Завтра")
 async def cmd_tomorrow(message: Message):
     await send_hw_page(message, "tomorrow")
 
@@ -1143,7 +1319,9 @@ async def cmd_done(message: Message):
         return
     hw_id = int(parts[1])
     if mark_done(hw_id, display_name(message.from_user)):
-        await message.answer(f"✅ Задание #{hw_id} отмечено как выполненное!")
+        register_user(message.from_user)
+        xp = add_xp(message.from_user.id, 20, "Выполнено домашнее задание")
+        await message.answer(f"✅ Задание #{hw_id} отмечено как выполненное!\n⭐ +20 XP · всего {xp} XP")
     else:
         await message.answer("❌ Задание с таким id не найдено.")
 
@@ -1300,7 +1478,9 @@ async def cb_done(callback: CallbackQuery):
     hw_id = int(callback.data.split(":")[1])
     who = display_name(callback.from_user)
     if mark_done(hw_id, who):
-        await callback.message.edit_text(f"✅ Задание #{hw_id} отмечено как выполненное ({who})!")
+        register_user(callback.from_user)
+        xp = add_xp(callback.from_user.id, 20, "Выполнено домашнее задание")
+        await callback.message.edit_text(f"✅ Задание #{hw_id} отмечено как выполненное ({who})!\n⭐ +20 XP · всего {xp} XP")
     else:
         await callback.answer("Задание не найдено", show_alert=True)
         return
