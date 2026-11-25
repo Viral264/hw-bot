@@ -13,7 +13,7 @@ from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ============ НАСТРОЙКИ ============
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН")
+BOT_TOKEN = os.getenv("8758690178:AAEYmqZSH-7V02ABkT9otcbwVNWgohqyN8I", "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН")
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "homework.db"))
 
 logging.basicConfig(level=logging.INFO)
